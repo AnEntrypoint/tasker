@@ -5,7 +5,7 @@
   "type": "module",
   "main": "blog-generator-cli.js",
   "scripts": {
-    "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"node blog-generator-cli.js test\"",
+    "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A blog-generator-cli.js test\"",
     "test:publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
   },
   "dependencies": {
