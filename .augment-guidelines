@@ -1,0 +1,99 @@
+Async Functionality and Event Loop
+Top-Level Await:
+
+Supported only in ES modules (using .mjs or "use module") or when using std.evalScript(str, {async:true}).
+Not available in standard scripts or synchronous eval.
+Event/Job Loop:
+
+No implicit event loop: If you embed QuickJS, you must call JS_ExecutePendingJob() (or equivalent) to process Promises, timers, async/await, etc.
+The command-line REPL manages this automatically; embedding applications must do it manually.
+No preemption/scheduling: Any synchronous (long-running/blocking) code will prevent async tasks (Promises, timers, etc.) from proceeding; the event loop only advances when JS execution returns to the event loop (i.e., after your script yields).
+Timers:
+
+Provided via os.setTimeout, os.clearTimeout, etc. (from the os module).
+os.sleepAsync returns a Promise and is async, but does not create threads.
+Timers/microtasks will not fire if the event loop is blocked (e.g., by infinite or long-running synchronous code).
+No "unref"/detach: Timers keep the process alive until cleared explicitly.
+No High-Resolution or Monotonic Time: Timers are not precise and may be imprecise depending on the platform.
+
+File, Stream, and I/O Operations
+All Standard Library I/O is Synchronous:
+
+std/os modules provide only blocking/synchronous operations—no native non-blocking or async I/O.
+Async/file/socket/network I/O must be manually implemented—e.g., using threads, polling, or integrating with your own OS event loop.
+Evented I/O:
+
+Each FD (file descriptor) supports only one setReadHandler/setWriteHandler at a time; reset with null to remove.
+Only basic event integration provided, no advanced scheduling.
+Passing Information & Return Values (Especially for Workers/Threads)
+Worker Threads:
+
+No nested workers (workers cannot spawn other workers).
+No shared JS state—only SharedArrayBuffer is shared; all other JS data is serialized and copied (via structured clone) between threads.
+Object identity is not preserved: If you send an object from main to worker, it is a separate copy in the worker.
+postMessage() and Message Passing:
+
+Only "structured-cloneable" data is supported:
+CAN PASS/COPY: Plain JSON types (object/array/number/string/boolean/null), ArrayBuffer, SharedArrayBuffer.
+CANNOT PASS: Functions, class instances with non-plain prototypes, Map, Set, DOM-like objects, open files/sockets/OS handles, or circular references.
+Custom methods/prototypes are lost on clone.
+Exceptions thrown in a worker are not passed to the parent.
+onmessage handler must be set on the worker (otherwise may exit immediately).
+Timers in one thread do not affect another thread.
+Serialization/Deserialization:
+
+Only JSON-compatible data and some basic binary types (ArrayBuffer, SharedArrayBuffer) are serialized.
+All others become plain JSON objects/arrays; custom logic, prototypes, or methods are lost.
+Resource handles (like file descriptors, sockets) cannot be cloned/serialized/transferred.
+Circular References, Map, Set:
+
+Not currently supported for passing to workers (not serializable). This may change in future QuickJS versions.
+SharedArrayBuffer/Atomics:
+
+Only SharedArrayBuffer may be shared; atomics work only with those (not with normal ArrayBuffer or objects).
+Exception & Async Error Handling
+Exception Boundaries:
+Promise rejections/exceptions are local to the microtask/timer/callback in which they occur; they do not automatically propagate up to parent functions or event loop.
+Garbage Collection (GC), Finalizers, and Resources
+GC & Cyclic References:
+
+Reference counting frees most objects automatically, with a secondary cycle-removal GC (may be delayed).
+For deterministic or immediate cycle cleanup, call gc() manually.
+No automatic cleanup of timers, event handlers, open files, or fds on GC or resource close: You must manage cleanup explicitly.
+Finalizers:
+
+Only C-level handlers (can't run JS code from a finalizer).
+Finalizers are for C-level resources only.
+Platform, Polyfills, and API Gaps
+Many os features are POSIX-only; expect differences or missing APIs on Windows (e.g., TTY flags, file attributes).
+No Intl/fetch/WebSocket/setImmediate/crypto built-in—must be provided by host or polyfilled in JS.
+No built-in AbortController: Promises/timers cannot be cancelled except by userland logic.
+Summary Table
+Area	Limitation/Caveat
+Top-level await	Only in modules (.mjs) or std.evalScript({async:true})
+Event loop	Host must process jobs (JS_ExecutePendingJob) for async support when embedding
+Timers	Not real-time; require os module; blocked by sync code; no "unref"/detach; must clear manually
+File/Stream IO	Synchronous/blocking only; async must be wrapped/threaded by the user
+Async I/O	No non-blocking IO, no async sockets built-in
+Event handlers	Only one setReadHandler/setWriteHandler per FD; set to null to remove
+Signal handling	Main thread only; one handler per signal
+Workers/Threads	No nested workers; only SharedArrayBuffer is shared; rest is copied via structured clone
+postMessage	Only JSON-style/ArrayBuffer/SharedArrayBuffer; methods/prototypes/handles not transferred
+Serialization	Circular refs, Map, Set, custom prototypes not supported/lost; resource handles cannot pass
+Object identity	Not preserved across worker boundaries
+GC/finalizers	Cycles may persist; call gc() manually for cycle cleanup; finalizers (C only, can't run JS)
+Platform	POSIX bias; features may not exist or differ on Windows
+ECMAScript gaps	No Intl/fetch/WebSocket/setImmediate/crypto unless polyfilled
+Exception boundary	Async errors local to microtimers; not propagated automatically to parent/event loop
+Abort/Cancellation	No AbortController; must implement cancellation/user logic manually
+Preemption/scheduler	None; long running sync code blocks all async/microtasks/timers
+Implicit loop in C	Absent; must call event loop manually when embedding
+Polyfills	APIs missing must be provided by hand/host/polyfill
+TL;DR / Practical Advice
+For async/multithreaded/worker code:
+
+Only basic "JSON-like" data, ArrayBuffer, and SharedArrayBuffer can cross thread/process boundaries. Everything else (functions, custom objects, handles) is lost or not allowed.
+All async depends on a manually pumped job/event loop except in qjs REPL.
+There is no real "background" or preemptive async: If your code blocks the event loop, nothing async will happen until your code yields.
+All resources and handlers must be cleaned up by you.
+If you need non-blocking IO/networking or things like fetch/WebSocket, you must add those yourself.
