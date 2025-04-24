@@ -96,6 +96,26 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
           }
+        },
+        // Add the tasks service proxy configuration
+        {
+          name: 'tasks',
+          baseUrl: `${SUPABASE_URL}/functions/v1/tasks`,
+          headers: { // Use standard anon key auth
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY
+          }
+        },
+        // ---> ADD wrappedgapi HERE <---
+        {
+          name: 'gapi', // The name used in QuickJS: tools.gapi
+          baseUrl: `${SUPABASE_URL}/functions/v1/wrappedgapi`,
+          headers: { // Use standard anon key auth
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'apikey': SUPABASE_ANON_KEY
+          }
         }
         // Add more services here as needed
       ];

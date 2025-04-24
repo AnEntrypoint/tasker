@@ -9,6 +9,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { generateSchema, formatSchema } from './services/schema-generator.ts';
 import { parseJSDocComments } from './utils/jsdoc-parser.ts';
 import { GeneratedSchema } from "./types/index.ts";
+import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.9/server";
 
 config({ export: true });
 
@@ -27,6 +28,42 @@ const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || '';
 console.log(`[INFO] SUPABASE_URL: ${SUPABASE_URL}`);
 const supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
+// --- Define the Tasks Service for SDK Wrapper ---
+const tasksService = {
+  execute: async (taskIdentifier: string, input: Record<string, unknown> = {}, options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}) => {
+    console.log(`[INFO][SDK Service] Received task execution request for: ${taskIdentifier}`);
+    const logs: string[] = [formatLogMessage('INFO', `[SDK Service] Executing task: ${taskIdentifier}`)];
+    try {
+      // Check registry first (same logic as direct execution)
+      if (specialTaskRegistry.hasTask(taskIdentifier) || basicTaskRegistry.hasTask(taskIdentifier)) {
+        logs.push(formatLogMessage('INFO', `[SDK Service] Executing registered task: ${taskIdentifier}`));
+        let result;
+        if (specialTaskRegistry.hasTask(taskIdentifier)) {
+          result = await specialTaskRegistry.executeTask(taskIdentifier, input, logs);
+        } else {
+          result = await basicTaskRegistry.executeTask(taskIdentifier, input, logs);
+        }
+        // The SDK wrapper expects the raw result, not a formatted Response
+        return { success: true, data: result, logs };
+      } else {
+        // Execute from database via executeTask
+        logs.push(formatLogMessage('INFO', `[SDK Service] Executing task from database: ${taskIdentifier}`));
+        const response = await executeTask(taskIdentifier, input, options);
+        const result = await response.json(); // executeTask returns a Response
+        // Extract data and logs from the formatted response
+        return { success: result.success, data: result.output, error: result.error, logs: result.logs };
+      }
+    } catch (error) {
+      const errorMsg = `[SDK Service] Error executing task ${taskIdentifier}: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[ERROR] ${errorMsg}`);
+      logs.push(formatLogMessage('ERROR', errorMsg));
+      // Throw the error so executeMethodChain can format it
+      throw new Error(errorMsg);
+    }
+  }
+};
+// ---------------------------------------------
+
 // Initialize global state
 if (!globalThis.__updatedFields) globalThis.__updatedFields = {};
 
@@ -42,245 +79,136 @@ function createCorsPreflightResponse(): Response {
   return new Response(null, { status: 204, headers: corsHeaders });
 }
 
-async function handleTaskRoutes(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  let pathname = url.pathname;
-  let path = pathname.split('/').filter(Boolean);
-  const method = request.method;
-
-  // Adjust for Supabase Functions mountpoint prefix: /functions/v1/tasks
-  if (path.length >= 3 && path[0] === 'functions' && path[1] === 'v1' && path[2] === 'tasks') {
-    // Remove the prefix segments
-    path = path.slice(3);
-    // Rebuild pathname based on remaining segments
-    pathname = '/' + path.join('/');
-    if (pathname === '/') pathname = '/';
-  }
-
-  console.log(`[INFO] Processing ${method} request to ${pathname}`);
-  
-  // Task execution route
-  if ((pathname === '/tasks' || pathname === '/') && method === 'POST') {
-    try {
-      const requestBody = await request.clone().json();
-      const taskIdentifier = requestBody.taskId || requestBody.id || requestBody.name;
-      
-      if (!taskIdentifier) {
-        return createErrorResponse('No task identifier provided', [formatLogMessage('ERROR', 'No task identifier provided')]);
-      }
-      
-      // Check if task exists in registry
-      if (specialTaskRegistry.hasTask(taskIdentifier) || basicTaskRegistry.hasTask(taskIdentifier)) {
-        const logs: string[] = [formatLogMessage('INFO', `Executing registered task: ${taskIdentifier}`)];
-        try {
-          let result;
-          if (specialTaskRegistry.hasTask(taskIdentifier)) {
-            result = await specialTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
-          } else {
-            result = await basicTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
-          }
-          return createResponse(result, logs);
-        } catch (error) {
-          const errorMsg = `Error executing registered task: ${error instanceof Error ? error.message : String(error)}`;
-          console.error(`[ERROR] ${errorMsg}`);
-          logs.push(formatLogMessage('ERROR', errorMsg));
-          return createErrorResponse(errorMsg, logs);
-        }
-      } else {
-        // Execute from database
-        const options = {
-          debug: Boolean(requestBody.debug),
-          verbose: Boolean(requestBody.verbose),
-          include_logs: Boolean(requestBody.include_logs)
-        };
-        return await executeTask(taskIdentifier, requestBody.input || {}, options);
-      }
-    } catch (error) {
-      const errorMsg = `Task execution error: ${error instanceof Error ? error.message : String(error)}`;
-      console.error(`[ERROR] ${errorMsg}`);
-      return createErrorResponse(errorMsg, [formatLogMessage('ERROR', errorMsg)]);
-    }
-  }
-  
-  // Schema generation route
-  if (path.length === 1 && path[0] === 'schema' && method === 'POST') {
-    try {
-      const { code } = await request.json();
-      if (!code) {
-        return createErrorResponse('No code provided for schema generation');
-      }
-      const schema = await generateSchema(code);
-      return createResponse(schema);
-    } catch (error) {
-      const errorMsg = `Schema generation error: ${error instanceof Error ? error.message : String(error)}`;
-      return createErrorResponse(errorMsg);
-    }
-  }
-  
-  // Task list route
-  if ((path.length === 1 && path[0] === 'list') || (pathname === '/tasks/list') && method === 'GET') {
-    try {
-      const endpoint = `${SUPABASE_URL}/rest/v1/task_functions`;
-      const response = await fetch(`${endpoint}?order=name.asc`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-        }
-      });
-      
-      if (!response.ok) {
-        return createErrorResponse(`REST API error: ${response.status} ${response.statusText}`);
-      }
-      
-      const data = await response.json();
-      return createResponse({
-        tasks: data || [],
-        count: data?.length || 0,
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      return createErrorResponse(`Error listing tasks: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  
-  // Task creation/update route
-  if (path.length === 1 && path[0] === 'create' && method === 'POST') {
-    try {
-      const { name, code, description } = await request.json();
-      
-      if (!name || !code) {
-        return createErrorResponse('Name and code are required for task creation');
-      }
-      
-      const checkResult = await supabaseClient.from('task_functions').select('id').eq('name', name).maybeSingle();
-      
-      if (checkResult.error && checkResult.error.code !== 'PGRST116') {
-        throw new Error(`Database error checking for existing task: ${checkResult.error.message}`);
-      }
-      
-      let result;
-      if (checkResult.data) {
-        result = await supabaseClient.from('task_functions').update({
-          code,
-          description: description || `Task ${name}`
-        }).eq('id', checkResult.data.id);
-      } else {
-        result = await supabaseClient.from('task_functions').insert({
-          name,
-          code,
-          description: description || `Task ${name}`
-        });
-      }
-      
-      if (result.error) {
-        throw new Error(`Database error: ${result.error.message}`);
-      }
-      
-      return createResponse({
-        message: `Task ${name} ${checkResult.data ? 'updated' : 'created'} successfully`,
-        task: {
-          name,
-          id: checkResult.data?.id,
-          description: description || `Task ${name}`
-        }
-      });
-    } catch (error) {
-      return createErrorResponse(`Error creating/updating task: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  
-  // Task deletion route
-  if (path.length === 1 && path[0] === 'delete' && method === 'POST') {
-    try {
-      const { name } = await request.json();
-      
-      if (!name) {
-        return createErrorResponse('Task name is required for deletion');
-      }
-      
-      const result = await supabaseClient.from('task_functions').delete().eq('name', name);
-      
-      if (result.error) {
-        throw new Error(`Database error: ${result.error.message}`);
-      }
-      
-      return createResponse({ message: `Task ${name} deleted successfully` });
-    } catch (error) {
-      return createErrorResponse(`Error deleting task: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  
-  // OpenAPI schema route - Refactored
-  if (path.length === 1 && path[0] === 'openapi' && method === 'GET') {
-    try {
-      // 1. Fetch all task functions from the database
-      const { data: tasks, error: fetchError } = await supabaseClient
-        .from('task_functions')
-        .select('name, code, description');
-
-      if (fetchError) {
-        throw new Error(`Database error fetching tasks: ${fetchError.message}`);
-      }
-
-      if (!tasks || tasks.length === 0) {
-        return createResponse({ openapi: '3.0.0', info: { title: 'Task API', version: '1.0.0' }, paths: {} }); // Return empty spec
-      }
-
-      // 2. Generate schema for each task
-      const schemas: Record<string, GeneratedSchema> = {};
-      for (const task of tasks) {
-        try {
-          // 2a. Parse JSDoc
-          const parsedInfo = parseJSDocComments(task.code || '', task.name || 'unknown');
-          // 2b. Generate internal schema
-          schemas[task.name] = generateSchema(parsedInfo);
-        } catch (parseError) {
-           // Cast parseError to Error to access message
-           const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
-           console.error(`[ERROR] Failed to parse/generate schema for task ${task.name}: ${errorMsg}`);
-           // Optionally skip this task or add a basic schema entry
-           schemas[task.name] = { name: task.name, description: `(Error generating schema: ${errorMsg})`, parameters: { type: 'object' }, returns: { type: 'object' } };
-        }
-      }
-
-      // 3. Format the aggregated schemas into OpenAPI format
-      // NOTE: The `formatSchema` function expects a *single* GeneratedSchema.
-      // We need an aggregation step or a different formatting function for multiple tasks.
-      // Let's assume `formatSchema` needs modification or we need a new `formatOpenAPI` function.
-      // For now, we cannot directly call `formatSchema` with `schemas`.
-      // We will just return the raw aggregated schemas for now.
-      // TODO: Implement proper OpenAPI aggregation/formatting based on the `formatSchema` capabilities or create a new formatter.
-
-      // Returning raw aggregated schemas (replace with actual OpenAPI formatting later)
-      const aggregatedSchemas = { 
-          info: { title: 'Task API Schemas (Aggregated)', version: '1.0.0' },
-          tasks: schemas 
-      };
-
-      // const openapiSchema = await formatSchema(aggregatedSchemas, 'openapi'); // Placeholder for future correct call
-
-      return createResponse(aggregatedSchemas); // Return the raw schemas for now
-
-    } catch (error) {
-      return createErrorResponse(`Error generating OpenAPI schema: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  
-  // If no route matched
-  return createErrorResponse('Route not found', [formatLogMessage('ERROR', `Route not found: ${url.pathname}`)], 404);
-}
-
 serve(async (req: Request, connInfo: ConnInfo): Promise<Response> => {
   if (req.method === 'OPTIONS') {
     return createCorsPreflightResponse();
   }
-  
+
+  const url = new URL(req.url);
+  // Use the full pathname provided by the Supabase gateway
+  const pathname = url.pathname;
+  console.log(`[INFO] Processing ${req.method} request to ${pathname}`);
+
   try {
-    return await handleTaskRoutes(req);
+    // --- Handle POST requests (Potential SDK Call or Direct Task Execution) ---
+    if (req.method === 'POST') {
+        let requestBody;
+        try {
+          requestBody = await req.clone().json();
+        } catch (e) {
+          const error = e as Error;
+          return createErrorResponse("Invalid JSON body", [formatLogMessage('ERROR', `Failed to parse JSON body: ${error.message}`)], 400);
+        }
+
+        // Check for SDK Wrapper request (has 'chain')
+        if (requestBody.chain && Array.isArray(requestBody.chain)) {
+          console.log(`[INFO] Handling SDK wrapper request for tasks service`);
+          try {
+            const result = await executeMethodChain(tasksService, requestBody.chain);
+            return new Response(JSON.stringify({ data: result }), { status: 200, headers: corsHeaders });
+          } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            console.error(`[ERROR][SDK Service] ${err.message}`);
+            return new Response(JSON.stringify({ 
+              error: { message: err.message, code: (err as any).code, name: err.name, stack: err.stack }
+            }), { status: (err as any).status || 500, headers: corsHeaders });
+          }
+        } 
+        // Handle Direct Task Execution request (POST without 'chain')
+        else {
+            console.log(`[INFO] Handling direct task execution request`);
+            const taskIdentifier = requestBody.taskId || requestBody.id || requestBody.name;
+            if (!taskIdentifier) {
+              return createErrorResponse('No task identifier provided in body', [], 400);
+            }
+            // Check registry or execute from DB (using the logic previously in handleTaskRoutes)
+            if (specialTaskRegistry.hasTask(taskIdentifier) || basicTaskRegistry.hasTask(taskIdentifier)) {
+                const logs: string[] = [formatLogMessage('INFO', `Executing registered task: ${taskIdentifier}`)];
+                try {
+                  let result;
+                  if (specialTaskRegistry.hasTask(taskIdentifier)) {
+                    result = await specialTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
+                  } else {
+                    result = await basicTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
+                  }
+                  return createResponse(result, logs);
+                } catch (error) {
+                  const errorMsg = `Error executing registered task: ${error instanceof Error ? error.message : String(error)}`;
+                  console.error(`[ERROR] ${errorMsg}`);
+                  logs.push(formatLogMessage('ERROR', errorMsg));
+                  return createErrorResponse(errorMsg, logs);
+                }
+            } else {
+                const options = {
+                  debug: Boolean(requestBody.debug),
+                  verbose: Boolean(requestBody.verbose),
+                  include_logs: Boolean(requestBody.include_logs)
+                };
+                // executeTask now returns Response, so just return it
+                return await executeTask(taskIdentifier, requestBody.input || {}, options);
+            }
+        }
+    }
+    // --- Handle GET requests (List, OpenAPI, etc.) ---
+    else if (req.method === 'GET') {
+        // Determine route based on the last segment of the path relative to the function mount point
+        const pathSegments = pathname.split('/').filter(Boolean);
+        const routeSegment = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : '';
+
+        // Task list route (/functions/v1/tasks/list or potentially just /functions/v1/tasks)
+        if (routeSegment === 'list' || (routeSegment === 'tasks' && pathSegments.includes('v1'))) { // Basic check
+             console.log(`[INFO] Handling GET request for task list`);
+            try {
+                const endpoint = `${SUPABASE_URL}/rest/v1/task_functions`;
+                const response = await fetch(`${endpoint}?order=name.asc`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+                });
+                if (!response.ok) return createErrorResponse(`REST API error: ${response.status} ${response.statusText}`);
+                const data = await response.json();
+                return createResponse({ tasks: data || [], count: data?.length || 0, timestamp: new Date().toISOString() });
+            } catch (error) {
+                return createErrorResponse(`Error listing tasks: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        // OpenAPI schema route (/functions/v1/tasks/openapi)
+        else if (routeSegment === 'openapi') {
+            console.log(`[INFO] Handling GET request for OpenAPI schema`);
+            try {
+                // Simplified OpenAPI generation logic from previous code
+                const { data: tasks, error: fetchError } = await supabaseClient.from('task_functions').select('name, code, description');
+                if (fetchError) throw new Error(`Database error fetching tasks: ${fetchError.message}`);
+                if (!tasks || tasks.length === 0) return createResponse({ openapi: '3.0.0', info: { title: 'Task API', version: '1.0.0' }, paths: {} });
+                const schemas: Record<string, GeneratedSchema> = {};
+                 for (const task of tasks) {
+                    try {
+                        const parsedInfo = parseJSDocComments(task.code || '', task.name || 'unknown');
+                        schemas[task.name] = generateSchema(parsedInfo);
+                    } catch (parseError) {
+                        const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+                        console.error(`[ERROR] Failed to parse/generate schema for task ${task.name}: ${errorMsg}`);
+                        schemas[task.name] = { name: task.name, description: `(Error generating schema: ${errorMsg})`, parameters: { type: 'object' }, returns: { type: 'object' } };
+                    }
+                }
+                const aggregatedSchemas = { info: { title: 'Task API Schemas (Aggregated)', version: '1.0.0' }, tasks: schemas };
+                return createResponse(aggregatedSchemas);
+            } catch (error) {
+                 return createErrorResponse(`Error generating OpenAPI schema: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        // Add other GET routes if needed (e.g., /health)
+        else {
+             return createErrorResponse('GET route not found', [formatLogMessage('ERROR', `GET Route not found: ${pathname}`)], 404);
+        }
+    }
+    // --- Handle other methods (PUT, DELETE, etc. - currently not standard task actions) ---
+    else {
+         return createErrorResponse(`Unsupported method: ${req.method}`, [], 405);
+    }
+
   } catch (error) {
-    console.error(`[ERROR] Unhandled error: ${error instanceof Error ? error.message : String(error)}`);
+    // Catch-all for unexpected errors in the main handler
+    console.error(`[ERROR] Unhandled error in main handler: ${error instanceof Error ? error.message : String(error)}`);
     return createErrorResponse(`Internal server error: ${error instanceof Error ? error.message : String(error)}`);
   }
 });

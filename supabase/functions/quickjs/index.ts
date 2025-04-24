@@ -810,7 +810,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (typeof module.exports === 'function') {
       // Log VM execution start directly
       console.log('[VM] Task function found. Executing...');
-      const resultPromiseOrValue = module.exports(globalThis.__input__ || {});
+      // Pass input AND context object { tools, require, module } as second argument
+      const resultPromiseOrValue = module.exports(
+          globalThis.__input__ || {},
+          { 
+              tools: globalThis.tools, 
+              require: globalThis.require, 
+              module: globalThis.module, 
+              // Add other context if needed
+          }
+      );
       if (resultPromiseOrValue && typeof resultPromiseOrValue.then === 'function') {
         console.log('[VM] Task returned a Promise. Awaiting...');
         const finalResult = await resultPromiseOrValue;
@@ -904,10 +913,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
              } else { /* finalResultHandle remains null */ }
 		} else if (evalResult && 'error' in evalResult) {
 		    addLog("error", "host", "Task execution failed (initial evalPromise rejected).");
-		    const errorDump = ctx.dump(evalResult.error);
-		    addLog("error", "host", "Task execution failed (eval error)", [errorDump]);
-			executionError = simpleStringify(errorDump);
-			finalResultHandle = evalResult.error;
+		    // Handle potential undefined error handle
+		    const errorHandle = evalResult.error;
+		    if (errorHandle && errorHandle.alive) {
+		        const errorDump = ctx.dump(errorHandle);
+		        addLog("error", "host", "Task execution failed (eval error)", [errorDump]);
+			    executionError = simpleStringify(errorDump);
+			    finalResultHandle = errorHandle; // Assign only if valid
+		    } else {
+		        addLog("error", "host", "Task execution failed (eval error), but error handle was invalid/undefined.");
+		        executionError = "Evaluation failed with invalid error handle";
+		        finalResultHandle = null; // Ensure it's null
+		    }
 		} else {
             addLog("info", "host", "Attempting to retrieve globalThis.__result__ after job loop...");
             let resultHandleAfterLoop: QuickJSHandle | undefined;
@@ -986,6 +1003,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 const msg = getError?.message || getError;
                 addLog("error", "host", "Failed to GET __result__ handle after loop:", [msg]);
                 executionError = `Failed to get final result handle: ${msg}`;
+                // Check before disposing
                 if (resultHandleAfterLoop && resultHandleAfterLoop.alive) resultHandleAfterLoop.dispose();
                 finalResultHandle = null;
             }

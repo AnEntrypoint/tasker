@@ -6,6 +6,8 @@
   "main": "blog-generator-cli.js",
   "scripts": {
     "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A blog-generator-cli.js test\"",
+    "nest": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A nested-task-cli.js test\"",
+    "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A test-live-gapi.js test\"",
     "test:publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
   },
   "dependencies": {
