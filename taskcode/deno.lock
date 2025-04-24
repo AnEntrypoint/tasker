@@ -658,12 +658,6 @@
   "workspace": {
     "dependencies": [
       "npm:yaml@^2.3.4"
-    ],
-    "packageJson": {
-      "dependencies": [
-        "npm:dotenv@^16.3.1",
-        "npm:node-fetch@^3.3.2"
-      ]
-    }
+    ]
   }
 }

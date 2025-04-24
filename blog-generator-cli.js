@@ -2,10 +2,6 @@
 
 import { envVars } from "./env.ts";
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 const {
   SUPABASE_URL: _SUP_URL,
   SUPABASE_ANON_KEY: _SUP_KEY,
@@ -19,7 +15,7 @@ const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
 const topic = Deno.args[0];
 
 (async () => {
-  await sleep(3000);
+  await new Promise((resolve) => setTimeout(resolve, 4000));
   try {
     console.log(`Using SUPABASE_URL: ${SUPABASE_URL}`);
     console.log(
