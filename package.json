@@ -1,0 +1,17 @@
+{
+  "name": "wrapped-services-test",
+  "version": "1.0.0",
+  "description": "Test script for wrapped Supabase services",
+  "type": "module",
+  "main": "blog-generator-cli.js",
+  "scripts": {
+    "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"node blog-generator-cli.js test\"",
+    "test:publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
