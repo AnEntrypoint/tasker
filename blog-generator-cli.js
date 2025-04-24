@@ -1,47 +1,53 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S deno run --allow-env --allow-net
 
-import dotenv from 'dotenv';
-dotenv.config();
+import { envVars } from "./env.ts";
 
-// Support remote override via EXT_* env vars
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 const {
   SUPABASE_URL: _SUP_URL,
   SUPABASE_ANON_KEY: _SUP_KEY,
   EXT_SUPABASE_URL,
-  EXT_SUPABASE_ANON_KEY
-} = process.env;
-// Prefer external (remote) values over local emulator values
+  EXT_SUPABASE_ANON_KEY,
+} = envVars;
+
 const SUPABASE_URL = EXT_SUPABASE_URL || _SUP_URL;
 const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
 
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const topic = Deno.args[0];
 
 (async () => {
-  await sleep(3000); // Add 3-second delay
+  await sleep(3000);
   try {
-
     console.log(`Using SUPABASE_URL: ${SUPABASE_URL}`);
-    console.log(`Using SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY ? '***REDACTED***' : 'undefined'}`);
+    console.log(
+      `Using SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY ? "***REDACTED***" : "undefined"}`
+    );
     const response = await fetch(`${SUPABASE_URL}/functions/v1/tasks`, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'apikey': SUPABASE_ANON_KEY
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        apikey: SUPABASE_ANON_KEY,
       },
-      body: JSON.stringify({ name: 'blog-generator', input: { topic: process.argv[2] } })
+      body: JSON.stringify({
+        name: "blog-generator",
+        input: { topic },
+      }),
     });
-    
-      const text = await response.text();
-      try {
-        console.log(JSON.parse(text, null, 2));
-        console.log(JSON.parse(text, null, 2).output);
-      } catch {
-        console.error('Non-JSON response:', text);
-      }
+
+    const text = await response.text();
+    try {
+      const parsed = JSON.parse(text);
+      console.log(JSON.stringify(parsed, null, 2));
+      console.log(parsed.output);
+    } catch {
+      console.error("Non-JSON response:", text);
+    }
   } catch (err) {
     console.error(err);
-  } finally {
-    process.exit(0);
   }
+  Deno.exit(0);
 })();
