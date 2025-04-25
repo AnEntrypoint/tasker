@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
-import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.9/server";
+import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.10/server";
 import { createClient } from "npm:@supabase/supabase-js";
 import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 config({ export: true });

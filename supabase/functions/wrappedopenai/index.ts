@@ -2,7 +2,7 @@ import OpenAI from 'npm:openai';
 import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
 import { corsHeaders } from '../quickjs/cors.ts';
 // Use the wrapper client to interact with keystore
-import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.9/client';
+import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.10/client';
 
 // Helper to determine Kong URL for local dev
 function getSupabaseUrl() {

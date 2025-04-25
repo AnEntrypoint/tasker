@@ -1,5 +1,5 @@
 import { config } from "https://deno.land/x/dotenv/mod.ts";
-import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.9/client';
+import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.10/client';
 
 // Load environment variables
 const env = config();

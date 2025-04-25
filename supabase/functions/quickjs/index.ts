@@ -9,7 +9,7 @@ import {
 	QuickJSRuntime,
 	QuickJSAsyncContext,
 } from "quickjs-emscripten";
-import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.9/client";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 
 console.log("[Host Pre-Init] Imports completed for quickjs/index.ts.");
 
@@ -79,26 +79,24 @@ function createHandleFromJsonNoTrack(context: QuickJSAsyncContext, jsValue: any)
 }
 
 async function callNestedHostProxy(proxy: any, chain: string[], args: any[]): Promise<any> {
-	console.log(`[Host Helper] Reconstructing call: Chain=${chain.join('.')}, Args=${args.length}`);
+	// console.log(`[Host Helper] Reconstructing call: Chain=${chain.join('.')}...`); // VERBOSE
 	let currentProxy = proxy;
-
 	for (let i = 0; i < chain.length; i++) {
 		const prop = chain[i];
 		if (!currentProxy || typeof currentProxy[prop] === 'undefined') {
-			 throw new Error(`[Host Helper] Property '${prop}' not found in chain.`);
+			throw new Error(`[Host Helper] Property '${prop}' not found in chain.`);
 		}
-		 console.log(`[Host Helper] Accessing proxy property: ${prop}`);
+		// console.log(`[Host Helper] Accessing proxy property: ${prop}`); // VERY VERBOSE
 		currentProxy = currentProxy[prop];
 	}
-
-	console.log(`[Host Helper] Invoking final proxy function with ${args.length} args.`);
+	// console.log(`[Host Helper] Invoking final proxy function with ${args.length} args.`); // VERBOSE
 	const finalProxy = currentProxy(...args);
-
-	console.log(`[Host Helper] Awaiting the finalProxy to trigger execution...`);
+	// console.log(`[Host Helper] Awaiting the finalProxy to trigger execution...`); // VERBOSE
 	const finalResult = await finalProxy;
-
-	console.log(`[Host Helper] Final result received:`, finalResult);
-	return finalResult;
+	// Avoid logging potentially large results even at debug
+	// console.log(`[Host Helper] Final result received:`, finalResult); // POTENTIALLY LARGE
+	// addLog("debug", "host", `[Host Helper] Final result received for chain ${chain.join('.')}. Type: ${typeof finalResult}`); // Removed - addLog not defined here
+	return finalResult; // Ensure function returns
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
@@ -110,7 +108,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		logs.push({ timestamp: new Date().toISOString(), level, source, message, data });
 		}
 		// Always log to console for visibility during development/debugging
-		console[level === "error" ? "error" : "log"](`[${source.toUpperCase()}] [${level.toUpperCase()}] ${message}`, ...(data || []));
+		// Use console.debug for debug level to potentially allow filtering
+		const consoleMethod = level === 'debug' ? console.debug : (level === 'error' ? console.error : (level === 'warn' ? console.warn : console.log));
+		consoleMethod(`[${source.toUpperCase()}] [${level.toUpperCase()}] ${message}`, ...(data || []));
 	};
 
 	if (req.method === "OPTIONS") { console.log("[Host] Responding to OPTIONS request"); return new Response("ok", { headers: corsHeaders }); }
@@ -129,8 +129,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 	try {
 		addLog("info", "host", "Processing request...");
 		const { code, input = {}, modules = {}, serviceProxies = [], runtimeConfig = {} } = await req.json();
-		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 60; // Default 60 seconds
-		addLog("info", "host", "Request body parsed.", [
+		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 120; // Default 120 seconds (doubled)
+		addLog("debug", "host", "Request body parsed.", [
 			`Code length: ${code?.length}`,
 			`Input keys: ${Object.keys(input)}`,
 			`Service Proxies: ${serviceProxies.map((p:any) => p.name).join(', ')}`,
@@ -148,7 +148,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		const quickjs = await getQuickJS();
 		addLog("debug", "host", "QuickJS WASM module initialized.");
 
-		addLog("info", "host", "Setting up QuickJS Async context...");
+		addLog("debug", "host", "Setting up QuickJS Async context...");
 		context = await newAsyncContext();
 		if (!context) {
 			throw new Error("Failed to create QuickJSAsyncContext");
@@ -160,12 +160,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		}
 		const rt = runtime;
 
-		rt.setMemoryLimit(256 * 1024 * 1024);
-		rt.setMaxStackSize(1 * 1024 * 1024);
+		rt.setMemoryLimit(512 * 1024 * 1024); // Doubled memory limit to 512MB
+		rt.setMaxStackSize(2 * 1024 * 1024); // Doubled stack size to 2MB
 		addLog("debug", "host", "Runtime limits set.");
 
 		// --- Create Host-Side Service Proxies ---
-		addLog("info", "host", "Creating host-side service proxies...");
+		addLog("debug", "host", "Creating host-side service proxies...");
 		try {
 			for (const proxyConfig of serviceProxies) {
 				if (!proxyConfig.name || !proxyConfig.baseUrl) {
@@ -563,7 +563,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			}
 			callNestedHostProxy(proxy, methodChain, args)
 				.then(result => {
-					console.log(`[HOST] [DEBUG] Request ${requestId} fulfilled for ${serviceName}.${methodChain.join('.')}`);
+					//console.log(`[HOST] [DEBUG] Request ${requestId} fulfilled for ${serviceName}.${methodChain.join('.')}`);
 					pendingRequests.set(requestId, { status: 'fulfilled', value: result });
 				})
 				.catch(error => {
@@ -576,7 +576,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 		// --- Inject __checkHostRequestStatus__ function --- No change needed here, logs are internal
 		const checkHostRequestStatusFn = (requestIdHandle: QuickJSHandle) => {
-			if (!ctx?.alive || !rt?.alive) { /* ... */ throw ctx.newError("Runtime disposed"); }
+			if (!ctx?.alive || !rt?.alive) { 
+				console.error("[HOST] [ERROR] checkHostRequestStatus: Context/Runtime disposed");
+				throw ctx.newError("Runtime disposed"); 
+			}
 			let requestId: string;
 			try { requestId = ctx.getString(requestIdHandle); } catch (dumpError: any) { throw new Error(`Failed to get request ID: ${dumpError?.message || dumpError}`); }
 			const request = pendingRequests.get(requestId) || { status: 'pending' };
@@ -880,7 +883,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 				if (activeTimers.size > 0) {
 					// Log timer status less frequently
-					if (Date.now() - lastTimerLogTime > 5000) { // Log every 5 seconds if timers are active
+					if (Date.now() - lastTimerLogTime > 15000) { // Log every 15 seconds if timers are active
 						addLog("debug", "host", `QuickJS idle but ${activeTimers.size} timers active. Yielding to host...`);
 						lastTimerLogTime = Date.now();
 					}
@@ -937,7 +940,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 						// Log success concisely
                         addLog("info", "host", "Successfully dumped __result__.");
 						// Keep preview in debug console only
-						console.log("[HOST] [DEBUG] Result Preview:", JSON.stringify(executionResult).slice(0, 200) + '...');
+						//console.log('[HOST] [DEBUG] Result Preview:', JSON.stringify(executionResult).slice(0, 200) + '...');
                         finalResultHandle = resultHandleAfterLoop;
                     } catch (dumpError: any) {
                         const msg = dumpError?.message || dumpError;
@@ -1021,20 +1024,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			 try {
 				 addLog("debug", "host", "Disposing finalResultHandle in finally block.");
 				 finalResultHandle.dispose();
-			} catch(e) { console.warn(`[HOST] [WARN] Error disposing finalResultHandle: ${e}`); }
+			 } catch(e) { console.warn(`[HOST] [WARN] Error disposing finalResultHandle: ${e instanceof Error ? e.message : String(e)}`); }
 		 }
 		 addLog("debug", "host", "Disposing QuickJS tracked handles...");
-		while (handles.length > 0) {
-			const h = handles.pop();
-			 try { if (h?.alive) h.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose handle err: ${e instanceof Error ? e.message : String(e)}`); }
+		 while (handles.length > 0) {
+			 const h = handles.pop();
+			  try { if (h?.alive) h.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose handle err: ${e instanceof Error ? e.message : String(e)}`); }
 		 }
 		 addLog("info", "host", "Disposing QuickJS context and runtime...");
 		 if (context?.alive) {
 			 try { context.dispose(); addLog("debug", "host", "QuickJS context disposed."); } catch (e) { console.warn(`[HOST] [WARN] Dispose ctx err: ${e instanceof Error ? e.message : String(e)}`); }
 		 } else {
-			  addLog("warn", "host", "Context already disposed before finally block.");
-		}
-		context = null;
+			 addLog("warn", "host", "Context already disposed before finally block.");
+		 }
+		 context = null;
 		 runtime = null;
 		 addLog("info", "host", `QuickJS resources cleanup finished. Total time: ${Date.now() - startTimestamp}ms`);
 	}
@@ -1049,8 +1052,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		try {
 			const payloadString = JSON.stringify(finalPayload);
 			// Log preview to console only
-			console.log(`[HOST] [DEBUG] Final success payload (stringified, length=${payloadString.length}): ${payloadString.substring(0, 500)}${payloadString.length > 500 ? '...' : ''}`);
-			console.log("[HOST] [DEBUG] Value of executionResult being sent (type:", typeof executionResult, "):", executionResult);
+			// console.log(`[HOST] [DEBUG] Final success payload (stringified, length=${payloadString.length}): ${payloadString.substring(0, 500)}${payloadString.length > 500 ? '...' : ''}`); // VERBOSE
+			// console.log("[HOST] [DEBUG] Value of executionResult being sent (type:", typeof executionResult, "):", executionResult); // POTENTIALLY LARGE
 		} catch (stringifyError) {
 			addLog("error", "host", "Failed to stringify final success payload!", [stringifyError]);
 			return new Response( JSON.stringify({ success: false, error: "Failed to stringify final result", logs }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );

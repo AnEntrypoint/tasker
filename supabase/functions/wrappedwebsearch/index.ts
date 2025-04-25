@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.9/server";
+import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
 import websearch from "./websearch-service.ts";
 
 const corsHeaders = {

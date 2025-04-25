@@ -1,4 +1,4 @@
-import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.9/client";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
 config({ export: true });

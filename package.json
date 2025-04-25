@@ -1,13 +1,13 @@
 {
   "name": "wrapped-services-test",
-  "version": "1.0.0",
   "description": "Test script for wrapped Supabase services",
   "type": "module",
   "main": "blog-generator-cli.js",
   "scripts": {
     "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A blog-generator-cli.js test\"",
     "nest": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A nested-task-cli.js test\"",
-    "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A test-live-gapi.js test\"",
+    "pre-gapi": "supabase db reset --confirm ; supabase start",
+    "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A gapi-directory-test-cli.js test\"",
     "test:publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
   },
   "dependencies": {

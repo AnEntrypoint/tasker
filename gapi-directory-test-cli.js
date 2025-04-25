@@ -1,7 +1,7 @@
 #!/usr/bin/env -S deno run --allow-env --allow-net
 
 import { envVars } from "./env.ts";
-import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.9/client";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -21,6 +21,25 @@ const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
 
 (async () => {
   await sleep(3000);
+  const publishProcess = Deno.run({
+    cmd: ["deno", "run", "-A", "./taskcode/publish.ts", "--all"],
+    stdout: "piped",
+    stderr: "piped"
+  });
+
+  const { code } = await publishProcess.status();
+  const rawOutput = await publishProcess.output();
+  const rawError = await publishProcess.stderrOutput();
+
+  //if (rawOutput.length) {
+  //  console.log(new TextDecoder().decode(rawOutput).trim());
+  //}
+  if (rawError.length) {
+    console.error(new TextDecoder().decode(rawError).trim());
+  }
+  if (code !== 0) {
+    throw new Error(`Publish script exited with code ${code}`);
+  }
   try {
     console.log(`Using SUPABASE_URL: ${SUPABASE_URL}`);
     console.log(
@@ -36,17 +55,30 @@ const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
         }
     });
 
-    console.log("Executing gapi-directory-test task via proxy...");
-    // Call the specific task without any input arguments
-    const result = await tasksProxy.execute('gapi-directory-test', {}); 
+    // --- Execute the Orchestrator Task ---
+    console.log("Executing gmail-search-orchestrator task via proxy...");
+    // Pass any input needed for the orchestrator (e.g., different query or max messages)
+    const orchestratorInput = {
+        searchQuery: "is:unread",
+        maxMessagesPerUser: 5
+    };
+    const result = await tasksProxy.execute(`gmail-search-orchestrator`, orchestratorInput); 
     
-    console.log("--- Full Task Response ---");
-    console.log(JSON.stringify(result, null, 2));
+    console.log("--- Orchestrator Task Response ---");
+    // Log the full response structure from the orchestrator
+    console.log(JSON.stringify(result, null, 2)); 
 
-    if (result && result.data) {
-        console.log("\n--- Extracted Task Output --- ");
-        console.log(JSON.stringify(result.data, null, 2));
+    // Optional: Log just the aggregated results part
+    if (result && result.data && result.data.results) {
+        console.log("\n--- Aggregated Search Results (from Orchestrator) ---");
+        console.log(JSON.stringify(result.data.results, null, 2));
     }
+    // Optional: Log summary
+     if (result && result.data && result.data.summary) {
+        console.log("\n--- Summary (from Orchestrator) ---");
+        console.log(JSON.stringify(result.data.summary, null, 2));
+    }
+
   } catch (err) {
     console.error("CLI Error:", err);
     // Check for sdk-http-wrapper specific error structure

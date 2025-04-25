@@ -7,12 +7,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 
 import { serve } from 'https://deno.land/std@0.131.0/http/server.ts'
 import { corsHeaders } from '../quickjs/cors.ts'
-import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.9/client'
+import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.10/client'
 // --- Use official googleapis Node library via npm specifier ---
 import { google } from 'npm:googleapis@^133' 
 // Import OAuth2Client type from the core auth library
 import type { OAuth2Client } from 'npm:google-auth-library@^9'; 
-import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.9/server"; // Import the server part
+import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.10/server"; // Import the server part
 
 console.log("[WrappedGAPI] Function initialized (using npm:googleapis and sdk-http-wrapper).");
 
@@ -30,7 +30,7 @@ function getSupabaseUrl() {
 
 const supabaseUrl = getSupabaseUrl();
 
-console.log(`[WrappedGAPI] Initializing keystore proxy targeting: ${supabaseUrl}/functions/v1/wrappedkeystore`);
+//console.log(`[WrappedGAPI] Initializing keystore proxy targeting: ${supabaseUrl}/functions/v1/wrappedkeystore`);
 const keystore = createServiceProxy('keystore', {
   baseUrl: `${supabaseUrl}/functions/v1/wrappedkeystore`,
       headers: {
@@ -55,14 +55,14 @@ interface ServiceAccountCredentials {
 }
 
 let cachedCreds: ServiceAccountCredentials | null = null;
-// Cache Auth clients per scope set
+// Cache Auth clients per scope set AND impersonated user
 const authClients: Record<string, OAuth2Client> = {}; 
 
 // Fetches and parses credentials (remains the same)
 async function getCredentialsFromKeystore(): Promise<ServiceAccountCredentials> {
   if (cachedCreds) return cachedCreds;
   try {
-    console.log("[WrappedGAPI] Attempting to fetch GAPI Service Account JSON from keystore (key: GAPI_KEY)...");
+    // console.log("[WrappedGAPI] Attempting to fetch GAPI Service Account JSON from keystore (key: GAPI_KEY)..."); // REPETITIVE
     const jsonString: string | null | undefined = await keystore.getKey('global', 'GAPI_KEY');
     
     if (!jsonString) {
@@ -78,7 +78,7 @@ async function getCredentialsFromKeystore(): Promise<ServiceAccountCredentials> 
     }
     
     cachedCreds = creds;
-    console.log(`[WrappedGAPI] Successfully parsed credentials for ${cachedCreds.client_email}.`);
+    // console.log(`[WrappedGAPI] Successfully parsed credentials for ${cachedCreds.client_email}.`); // REPETITIVE
     return cachedCreds;
   } catch (error) {
     console.error("[WrappedGAPI] Error fetching/parsing GAPI credentials from keystore:", error);
@@ -88,94 +88,74 @@ async function getCredentialsFromKeystore(): Promise<ServiceAccountCredentials> 
   }
 }
 
-// Function to get an authenticated JWT client for specific scopes
-async function getAuthClient(scope: string | string[]): Promise<OAuth2Client> {
+// Modified function to get an authenticated JWT client for specific scopes AND user
+async function getAuthClient(scope: string | string[], userEmailToImpersonate: string | null): Promise<OAuth2Client> {
+    // console.log(`[WrappedGAPI getAuthClient] START - Scopes: ${JSON.stringify(scope)}, User: ${userEmailToImpersonate || 'none'}`); // VERBOSE
     const scopesArray = Array.isArray(scope) ? scope.sort() : [scope];
     const scopeKey = scopesArray.join(',');
-    
-    if (authClients[scopeKey]) {
-        console.log(`[WrappedGAPI] Reusing cached Auth client for scope: ${scopeKey}`);
-        return authClients[scopeKey];
+    const cacheKey = `${scopeKey}::user:${userEmailToImpersonate || 'none'}`;
+    // console.log(`[WrappedGAPI getAuthClient] Cache key: ${cacheKey}`); // VERBOSE
+
+    if (authClients[cacheKey]) {
+        // console.log(`[WrappedGAPI getAuthClient] Reusing cached Auth client for key: ${cacheKey}`); // VERBOSE
+        return authClients[cacheKey];
     }
 
-    console.log(`[WrappedGAPI] Creating new Auth client for scope: ${scopeKey}`);
-    const credentials = await getCredentialsFromKeystore();
-
-    // --- Fetch Admin Email for Impersonation ---
-    let adminEmailToImpersonate: string | null = null;
+    // console.log(`[WrappedGAPI getAuthClient] Creating NEW Auth client for key: ${cacheKey}`); // VERBOSE
+    let credentials;
     try {
-        console.log("[WrappedGAPI] Attempting to fetch GAPI_ADMIN_EMAIL from keystore...");
-        adminEmailToImpersonate = await keystore.getKey('global', 'GAPI_ADMIN_EMAIL');
-        if (!adminEmailToImpersonate) {
-            console.warn("[WrappedGAPI] GAPI_ADMIN_EMAIL key not found or is empty in keystore. Proceeding without impersonation subject.");
-        } else {
-            console.log(`[WrappedGAPI] Will impersonate user: ${adminEmailToImpersonate}`);
-        }
-    } catch (keyError) {
-        console.error("[WrappedGAPI] Error fetching GAPI_ADMIN_EMAIL from keystore:", keyError);
-        // Decide if this is fatal. For now, warn and proceed without impersonation.
-        console.warn("[WrappedGAPI] Proceeding without impersonation subject due to keystore error.");
-        adminEmailToImpersonate = null; 
+        credentials = await getCredentialsFromKeystore();
+    } catch (credError) {
+        console.error("[WrappedGAPI getAuthClient] FATAL: Failed to get credentials from keystore.", credError);
+        throw credError; // Re-throw critical error
     }
-    // --- End Fetch Admin Email ---
 
     try {
+        // console.log(`[WrappedGAPI getAuthClient] Instantiating JWT client. Impersonating: ${userEmailToImpersonate || 'Service Account Default'}`); // REPETITIVE
         const jwtClient = new google.auth.JWT(
             credentials.client_email,
-            undefined, // keyFile path - not used when key is provided directly
+            undefined,
             credentials.private_key,
             scopesArray,
-            adminEmailToImpersonate ?? undefined // Subject (pass undefined if null)
+            userEmailToImpersonate ?? undefined
         );
         
-        // Authorize the client (fetches the initial token)
-        await jwtClient.authorize(); 
-        console.log(`[WrappedGAPI] JWT Auth client created and authorized for scope: ${scopeKey}`);
-        authClients[scopeKey] = jwtClient as unknown as OAuth2Client; // Cast needed due to type mismatch, ensure compatibility
-        return authClients[scopeKey];
+        // console.log(`[WrappedGAPI getAuthClient] Attempting to authorize JWT client for cache key: ${cacheKey}...`); // REPETITIVE
+        // Add explicit try/catch around authorize
+        try {
+            await jwtClient.authorize(); 
+            // console.log(`[WrappedGAPI getAuthClient] JWT Auth client AUTHORIZED successfully for cache key: ${cacheKey}`); // REPETITIVE
+        } catch (authorizeError) {
+            console.error(`[WrappedGAPI getAuthClient] FAILED to authorize JWT client for key ${cacheKey}:`, authorizeError);
+            throw authorizeError; // Re-throw authorization error
+        }
+
+        authClients[cacheKey] = jwtClient as unknown as OAuth2Client;
+        // console.log(`[WrappedGAPI getAuthClient] Storing and returning new auth client for key: ${cacheKey}`); // REPETITIVE
+        return authClients[cacheKey];
     } catch (authError) {
-        console.error("[WrappedGAPI] Error creating/authorizing JWT client:", authError);
-        throw new Error(`Failed to create/authorize JWT client: ${authError instanceof Error ? authError.message : String(authError)}`);
+        console.error("[WrappedGAPI getAuthClient] Overall error creating/authorizing JWT client:", authError);
+        // Check if the error has a message property before accessing it
+        const errorMessage = (authError instanceof Error) ? authError.message : String(authError);
+
+        // Don't re-throw here if authorize already threw, but ensure an error is thrown
+        if (!(errorMessage.includes("FAILED to authorize JWT client"))) {
+           throw new Error(`Failed to create/authorize JWT client: ${errorMessage}`);
+        }
+        // If authorize already threw, the error has been logged and re-thrown
+        throw authError; // Ensure error propagates
     }
 }
 
 // --- End Auth Logic ---
 
-// --- Global SDK Instances & Initialization ---
-const DEFAULT_ADMIN_SCOPES = [
-    'https://www.googleapis.com/auth/admin.directory.user.readonly',
-    'https://www.googleapis.com/auth/admin.directory.domain.readonly',
-    'https://www.googleapis.com/auth/admin.directory.customer.readonly'
-    // Add other commonly needed scopes here if necessary
-];
-
-let adminServiceInstance: any = null;
-let initializationError: Error | null = null;
-
-async function initializeAdminService() {
-    if (adminServiceInstance || initializationError) return; // Already done or failed
-    try {
-        console.log("[WrappedGAPI] Initializing Admin SDK service instance...");
-        const authClient = await getAuthClient(DEFAULT_ADMIN_SCOPES);
-        adminServiceInstance = google.admin({ version: 'directory_v1', auth: authClient });
-        console.log("[WrappedGAPI] Admin SDK service instance initialized successfully.");
-        // --- Log the top-level keys of the initialized instance ---
-        if (adminServiceInstance) {
-            console.log("[WrappedGAPI] Keys on adminServiceInstance:", Object.keys(adminServiceInstance));
-        } else {
-            console.warn("[WrappedGAPI] adminServiceInstance is null/undefined after creation attempt.");
-        }
-        // --- End Logging ---
-    } catch (error) {
-        initializationError = error instanceof Error ? error : new Error(String(error));
-        console.error("[WrappedGAPI] Failed to initialize Admin SDK service:", initializationError);
-    }
-}
-
-// Initialize eagerly
-initializeAdminService();
-
-// --- End Initialization --- 
+// --- REMOVED Global SDK Instances & Initialization ---
+// const DEFAULT_ADMIN_SCOPES = [...]; // REMOVED
+// let adminServiceInstance: any = null; // REMOVED
+// let initializationError: Error | null = null; // REMOVED
+// async function initializeAdminService() { ... } // REMOVED
+// initializeAdminService(); // REMOVED
+// --- End REMOVAL --- 
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -187,113 +167,198 @@ serve(async (req) => {
   console.log(`[WrappedGAPI] Request received { url: "${requestUrl}", method: "${req.method}" }`);
 
   try {
-    // --- Ensure Service is Initialized --- 
-    if (!adminServiceInstance && !initializationError) {
-        console.warn("[WrappedGAPI] Admin service not yet initialized, awaiting...");
-        await initializeAdminService(); // Wait if initial call hasn't finished
-    }
-    // Throw if initialization failed
-    if (initializationError) {
-        console.error("[WrappedGAPI] Cannot handle request due to initialization failure:", initializationError.message);
-        throw new Error(`GAPI Service Initialization Failed: ${initializationError.message}`);
-    }
-    // Throw if still not initialized after waiting (shouldn't happen if init didn't error)
-    if (!adminServiceInstance) {
-        console.error("[WrappedGAPI] Service instance is unexpectedly null after initialization attempt.");
-        throw new Error("GAPI Service could not be initialized (instance is null).");
-    }
-    // --- End Initialization Check --- 
+    // --- REMOVED Initialization Check --- 
+    // The check for adminServiceInstance and initializationError is no longer needed
+    // --- End REMOVAL --- 
 
     const body = await req.json();
-    // Log the raw received body
-    console.log(`[WrappedGAPI] Received raw body:`, JSON.stringify(body));
+    // console.log(`[WrappedGAPI Handler] Received raw body:`, JSON.stringify(body)); // POTENTIALLY LARGE & VERBOSE - REMOVE
 
-    // --- Adapt to observed payload { chain: [...], config: {...} } ---
-    const serviceName = 'gapi'; // Infer service name as client isn't sending it
+    // --- Extract chain, config, and final args --- 
+    const serviceName = 'gapi'; // Assume 'gapi' namespace
     const chain = body?.chain;
-    
-    // Extract args for the FINAL call from the LAST element in the chain
+    let config = body?.config || {}; // Extract config object - **Start with body.config**
     let finalCallArgs: any[] = [];
+
     if (chain && Array.isArray(chain) && chain.length > 0) {
         const lastStep = chain[chain.length - 1];
         if (lastStep && lastStep.type === 'call' && Array.isArray(lastStep.args)) {
-            finalCallArgs = lastStep.args;
+            // Check if the *last* argument looks like our config object
+            const potentialConfigArg = lastStep.args[lastStep.args.length - 1];
+            if (
+                lastStep.args.length > 0 && 
+                typeof potentialConfigArg === 'object' && 
+                potentialConfigArg !== null && 
+                (
+                    potentialConfigArg.hasOwnProperty('__impersonate') || 
+                    Object.keys(potentialConfigArg).length > 0 // Or if it's just a non-empty object meant for config
+                )
+            ) {
+                 // If the last arg is our config, separate it
+                finalCallArgs = lastStep.args.slice(0, -1); // All args except the last one
+                // Merge it with any config already present in body.config
+                config = { ...config, ...potentialConfigArg }; 
+            } else {
+                // Otherwise, all args are actual API args
+                finalCallArgs = lastStep.args;
+            }
         }
     }
+    // console.log(`[WrappedGAPI Handler] Extracted - Chain: ${JSON.stringify(chain)}, Config: ${JSON.stringify(config)}, Args: ${JSON.stringify(finalCallArgs)}`); // VERBOSE - REMOVE
 
-    console.log(`[WrappedGAPI] Extracted - Service (inferred): ${serviceName}, Chain: ${JSON.stringify(chain)}, Args (from last chain step): ${JSON.stringify(finalCallArgs)}`);
-
-    // Validation based on observed payload
-    if (!chain || !Array.isArray(chain)) {
-         console.error("[WrappedGAPI] Invalid request format: 'chain' property missing or not an array.", body);
-         throw new Error("Invalid request format: 'chain' property missing or not an array.");
+    if (!chain || !Array.isArray(chain) || chain.length === 0) {
+         console.error("[WrappedGAPI Handler] Invalid request format: 'chain' property missing, not an array, or empty.", body);
+         throw new Error("Invalid request format: 'chain' property missing, not an array, or empty.");
     }
-    // --- End Adaptation ---
+    // --- End Extraction ---
 
-    // Define the configuration for processSdkRequest
+    // --- Dynamic Client/Service Creation --- 
+    // ***MODIFIED: Get impersonation target from config, not args***
+    const userIdToImpersonate = config.__impersonate || null; 
+    const requiredScopes = getScopesForCall(chain); 
+    //console.log(`[WrappedGAPI Handler] User to impersonate (from config.__impersonate): ${userIdToImpersonate || 'none'}`); // REMOVE
+    //console.log(`[WrappedGAPI Handler] Determined required scopes: ${JSON.stringify(requiredScopes)}`); // REMOVE
+
+    //console.log(`[WrappedGAPI Handler] Attempting to get auth client...`); // REMOVE
+    const authClient = await getAuthClient(requiredScopes, userIdToImpersonate);
+    // console.log(`[WrappedGAPI Handler] Successfully obtained auth client.`); // REPETITIVE - REMOVE
+
+    const topLevelService = chain[0]?.property;
+    // console.log(`[WrappedGAPI Handler] Determined topLevelService: ${topLevelService}`); // Less critical - REMOVE
+    let googleApiServiceInstance: any;
+
+    switch (topLevelService) {
+        case 'gmail':
+            // console.log("[WrappedGAPI] Creating Gmail service instance..."); // REPETITIVE
+            googleApiServiceInstance = google.gmail({ version: 'v1', auth: authClient });
+            break;
+        case 'admin':
+            // console.log("[WrappedGAPI] Creating Admin Directory service instance..."); // REPETITIVE
+            googleApiServiceInstance = google.admin({ version: 'directory_v1', auth: authClient });
+            break;
+        // Add cases for other services like drive, calendar, etc. as needed
+        default:
+            console.error(`[WrappedGAPI] Unsupported top-level Google API service requested: ${topLevelService}`);
+            throw new Error(`Unsupported Google API service: ${topLevelService}. Supported: gmail, admin`);
+    }
+    // console.log(`[WrappedGAPI Handler] Dynamically created Google API service instance for: ${topLevelService}. Instance keys: ${googleApiServiceInstance ? Object.keys(googleApiServiceInstance).join(', ') : 'null'}`); // Less critical - REMOVE
+    // --- End Dynamic Client/Service Creation Logging ---
+
     const sdkConfig: Record<string, { instance: any }> = {
-        'gapi': { instance: adminServiceInstance }
+        [topLevelService]: { instance: googleApiServiceInstance } 
     };
 
-    // Check if the requested service exists in our config
-    if (!sdkConfig[serviceName]) { // Use inferred serviceName
-         console.error(`[WrappedGAPI] Unsupported service configured/inferred: ${serviceName}`);
-         throw new Error(`Unsupported service: ${serviceName}. Available: ${Object.keys(sdkConfig).join(', ')}`);
+    if (!sdkConfig[topLevelService]) { 
+         console.error(`[WrappedGAPI Handler] Internal error: Dynamic SDK config creation failed for ${topLevelService}`);
+         throw new Error(`Internal SDK configuration error for service: ${topLevelService}`);
     }
 
-    // --- Construct the payload expected by processSdkRequest ---
     const processSdkPayload = {
-        service: serviceName,
-        // Remove the first step (e.g., 'admin') from the chain 
-        // as processSdkRequest starts from the instance provided in sdkConfig
-        chain: chain.slice(1),
-        args: finalCallArgs // Use the extracted args from the last chain step
+        service: topLevelService, 
+        chain: chain.slice(1), 
+        args: finalCallArgs 
     };
-    console.log(`[WrappedGAPI] Calling processSdkRequest with constructed payload (modified chain):`, JSON.stringify(processSdkPayload));
-    // --- End Constructed Payload ---
+    // console.log(`[WrappedGAPI Handler] Calling processSdkRequest with dynamic payload:`, JSON.stringify(processSdkPayload)); // VERBOSE
+    
+    let result;
+    try {
+        result = await processSdkRequest(processSdkPayload, sdkConfig[topLevelService]);
+        // console.log(`[WrappedGAPI Handler] processSdkRequest raw result: Status=${result?.status}, Body=${JSON.stringify(result?.body)}`); // VERY VERBOSE & LARGE
+    } catch (sdkError) {
+        console.error(`[WrappedGAPI Handler] ERROR during processSdkRequest call:`, sdkError);
+        throw sdkError; // Re-throw
+    }
 
-    let result = await processSdkRequest(processSdkPayload, sdkConfig[serviceName]);
-
-    // --- Check for errors returned by processSdkRequest ---
+    // --- Check for errors returned by processSdkRequest --- Enhanced Logging ---
     if (result.status >= 400) {
-        console.error(`[WrappedGAPI] processSdkRequest returned error status ${result.status}. Body:`, result.body);
+        console.error(`[WrappedGAPI Handler] processSdkRequest returned ERROR status ${result.status}. Body:`, JSON.stringify(result.body));
         // Throw an error object compatible with the outer catch block
+        const errorDetails = typeof result.body === 'object' ? JSON.stringify(result.body) : String(result.body);
         throw { 
             status: result.status, 
             message: `SDK call failed with status ${result.status}`, 
-            details: result.body // Include the original body as details
+            details: errorDetails // Include the original body as details
         };
     }
     // --- End error check ---
 
-    console.log(`[WrappedGAPI] processSdkRequest completed successfully with status: ${result.status}`);
+    // console.log(`[WrappedGAPI Handler] processSdkRequest completed successfully with status: ${result.status}`); // Less critical
     return new Response(JSON.stringify(result.body), { 
         status: result.status,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
 
   } catch (error) {
-    // Simplified Error Handling
-    console.error(`[WrappedGAPI] Handler error processing request for ${requestUrl}:`, error);
-    const status = (typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number') 
-                   ? error.status 
-                   : 500;
-    const message = error instanceof Error ? error.message : String(error);
+    // --- Enhanced Outer Error Handling ---
+    console.error(`[WrappedGAPI Handler] FATAL CATCH BLOCK processing request for ${requestUrl}:`, error);
+    // Log specific properties if available
+    let errorMessage = 'Internal Server Error';
+    let errorDetails = undefined;
+    let errorStatus = 500;
+    let errorStack = undefined;
+
+    if (error instanceof Error) {
+        errorMessage = error.message;
+        errorStack = error.stack;
+    }
+    if (typeof error === 'object' && error !== null) {
+        errorStatus = (error as any).status ?? errorStatus;
+        // Use specific message if available and not already set by Error instance
+        if (typeof (error as any).message === 'string' && errorMessage === 'Internal Server Error') {
+             errorMessage = (error as any).message;
+        }
+        errorDetails = (error as any).details ?? errorDetails;
+    }
+    
+    console.error(`[WrappedGAPI Handler] Error Details: Status=${errorStatus}, Message=${errorMessage}, Details=${errorDetails}, Stack=${errorStack}`);
+
+    const errorBody = { 
+        success: false, 
+        error: errorMessage, 
+        details: errorDetails
+    };
 
     return new Response(
-      JSON.stringify({ success: false, error: message }),
-      { status: status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify(errorBody),
+      { status: errorStatus, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
+    // --- End Enhanced Outer Error Handling ---
   }
 });
 
-console.log("[Host] WrappedGAPI server started (sdk-http-wrapper mode, simplified).");
+console.log("[Host] WrappedGAPI server started (dynamic impersonation mode).");
 
 /* 
 NOTE: This function now uses the 'google_api' Deno library (deno.land/x/google_api) 
 and the sdk-http-wrapper server.
 It authenticates using a Service Account JSON stored in the keystore under 'GAPI_KEY'.
-It initializes the Admin SDK service on startup.
-
-Invocation requires using the sdk-http-wrapper client proxy, like in test-live-gapi.ts (after refactoring).
+It dynamically creates authenticated clients and SDK instances per request, 
+attempting impersonation based on the 'userId' parameter found in the request arguments.
+Scope determination is currently basic and needs refinement.
 */
+
+// --- Dynamically determine required scopes (Simplified example) ---
+// TODO: Implement a more robust scope determination logic based on the API call chain
+function getScopesForCall(chain: any[]): string[] {
+    // Example: Check the first part of the chain (e.g., 'gmail', 'admin')
+    const topLevelService = chain?.[0]?.property; 
+    if (topLevelService === 'gmail') {
+        // console.log("[WrappedGAPI Scope Helper] Detected 'gmail' call, using Gmail scopes."); // Less critical
+        return [
+            'https://www.googleapis.com/auth/gmail.readonly', // Common read scope
+            'https://mail.google.com/' // Broad scope often needed for list/modify
+        ];
+    } else if (topLevelService === 'admin') {
+        // console.log("[WrappedGAPI Scope Helper] Detected 'admin' call, using Admin Directory scopes."); // Less critical
+        // Default Admin scopes (adjust if needed)
+        return [
+            'https://www.googleapis.com/auth/admin.directory.user.readonly',
+            'https://www.googleapis.com/auth/admin.directory.domain.readonly',
+            'https://www.googleapis.com/auth/admin.directory.customer.readonly'
+        ];
+    }
+    // Add more conditions for other services (Drive, Calendar, etc.)
+    // console.warn(`[WrappedGAPI Scope Helper] Unknown top-level service '${topLevelService}'. Falling back to default Admin scopes.`); // Less critical
+    // Fallback scopes (consider if this is safe or should throw error)
+    return ['https://www.googleapis.com/auth/admin.directory.user.readonly'];
+}
