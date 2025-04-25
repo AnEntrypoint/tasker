@@ -1,7 +1,9 @@
 {
   "version": "4",
   "specifiers": {
+    "npm:@types/node@*": "22.5.4",
     "npm:openai@*": "4.93.0",
+    "npm:sdk-http-wrapper@1.0.10": "1.0.10_openai@4.93.0",
     "npm:sdk-http-wrapper@1.0.9": "1.0.9_openai@4.93.0"
   },
   "npm": {
@@ -446,6 +448,16 @@
     },
     "safer-buffer@2.1.2": {
       "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="
+    },
+    "sdk-http-wrapper@1.0.10_openai@4.93.0": {
+      "integrity": "sha512-/wKqPH7pi6Yyphqx3E7Kq4P8h/825svZ+Z3favHF5plMEFEMuERHjRaDT5kxnEFGkczyxICqD7WYjZdT4GDZKQ==",
+      "dependencies": [
+        "cors",
+        "dotenv",
+        "express",
+        "node-fetch@3.3.2",
+        "openai"
+      ]
     },
     "sdk-http-wrapper@1.0.9_openai@4.93.0": {
       "integrity": "sha512-ecauvIgJwPz04lf235RYXQsTWuWXUbRU+LO7NLn1Cm6OOZ2qUpGYZ2gOQi94zZXr28VkRggh3U35iX3YHfzgyg==",

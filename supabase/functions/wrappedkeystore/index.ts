@@ -1,6 +1,6 @@
 import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
-import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.9/server";
-import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.9/client";
+import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 
 // Type definitions
 type ServerTimeResult = {
@@ -77,7 +77,7 @@ class KeystoreService {
       console.error("Get key error:", error);
       throw new Error(`Failed to get key: ${error.message}`);
     }
-    console.log(`Got data:`, result);
+    //console.log(`Got data:`, result);
     return result?.length ? result[0].value : null;
   }
   
@@ -100,7 +100,7 @@ class KeystoreService {
         throw new Error(`Failed to check existing key: ${checkError.message}`);
       }
       
-      console.log(`Existing key check result:`, existing);
+      //console.log(`Existing key check result:`, existing);
       
       // Update or insert based on whether the key exists
       if (existing?.length) {
@@ -155,7 +155,7 @@ class KeystoreService {
       queryResult = await this.supabase
       .from('keystore')
       .select('scope');
-      console.log(`[KeystoreService] listNamespaces query completed. Raw result:`, queryResult);
+      //console.log(`[KeystoreService] listNamespaces query completed. Raw result:`, queryResult);
     } catch (queryError: unknown) {
         console.error(`[KeystoreService] listNamespaces query FAILED:`, queryError);
         // Check if it's an Error object before accessing message
@@ -178,7 +178,7 @@ class KeystoreService {
         if (row.scope) namespaces.add(row.scope);
       });
       const result = Array.from(namespaces);
-      console.log(`[KeystoreService] Found ${result.length} namespaces:`, result);
+      //console.log(`[KeystoreService] Found ${result.length} namespaces:`, result);
       return result;
     }
     
@@ -233,7 +233,7 @@ serve(async (req) => {
         
         // Handle both action and chain formats
         if (body.action) {
-          console.log(`Processing action request: ${body.action}`, body);
+          //console.log(`Processing action request: ${body.action}`, body);
           
           // Map action to method calls
           switch (body.action) {
@@ -258,14 +258,14 @@ serve(async (req) => {
         } 
         // Handle chain format
         else if (body.chain) {
-          console.log('Processing SDK proxy request with chain:', body.chain);
+          //console.log('Processing SDK proxy request with chain:', body.chain);
           result = await executeMethodChain(keystoreService, body.chain);
         } 
         else {
           throw new Error("Request must include either 'action' or 'chain' property");
         }
         
-        console.log('SDK proxy response:', result);
+        //console.log('SDK proxy response:', result);
         return new Response(JSON.stringify(result), { 
           status: 200, 
           headers: { ...corsHeaders, "Content-Type": "application/json" }

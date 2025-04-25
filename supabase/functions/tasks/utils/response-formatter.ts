@@ -98,7 +98,7 @@ function safeStringify(obj: unknown, space: number = 2): string {
  */
 export interface StandardResponse {
   success: boolean;
-  data?: any;
+  result?: any;
   error?: string;
   errorType?: string;
   stack?: string;
@@ -126,7 +126,7 @@ export function jsonResponse(data: any, status = 200): Response {
  */
 export function formatTaskResult(
   success: boolean, 
-  data?: any, 
+  result?: any,
   error?: string, 
   logs: string[] = [], 
   errorType?: string, 
@@ -134,7 +134,7 @@ export function formatTaskResult(
 ): StandardResponse {
   return {
     success,
-    ...(data !== undefined ? { data } : {}),
+    ...(result !== undefined ? { result } : {}),
     ...(error ? { error } : {}),
     ...(errorType ? { errorType } : {}),
     ...(stack ? { stack } : {}),

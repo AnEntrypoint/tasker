@@ -2,7 +2,7 @@
 
 import * as path from "https://deno.land/std@0.201.0/path/mod.ts";
 import * as fs from "https://deno.land/std@0.201.0/fs/mod.ts";
-import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.9/client";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 import { load } from "https://deno.land/std@0.201.0/dotenv/mod.ts";
 
 // Load environment variables from .env file
@@ -39,8 +39,7 @@ const CONFIG = {
   SUPABASE_URL: Deno.env.get("SUPABASE_URL") || Deno.env.get("EXT_SUPABASE_URL") || "http://localhost:54321",
   SUPABASE_SERVICE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "",
   TASK_DIRS: [
-    Deno.env.get("TASKS_DIRECTORY") ? `${Deno.env.get("TASKS_DIRECTORY")}/endpoints/` : "./taskcode/endpoints/",
-    "./supabase/functions/tasks/"
+    Deno.env.get("TASKS_DIRECTORY") ? `${Deno.env.get("TASKS_DIRECTORY")}/endpoints/` : "./taskcode/endpoints/"
   ]
 };
 

@@ -1,52 +1,9 @@
 {
   "version": "4",
   "specifiers": {
-    "jsr:@supabase/functions-js@*": "2.4.4",
-    "npm:@types/node@*": "22.5.4",
-    "npm:quickjs-emscripten@*": "0.31.0",
-    "npm:quickjs-emscripten@0.24.0": "0.24.0",
-    "npm:sdk-http-wrapper@1.0.10": "1.0.10",
-    "npm:sdk-http-wrapper@1.0.9": "1.0.9"
-  },
-  "jsr": {
-    "@supabase/functions-js@2.4.4": {
-      "integrity": "38456509a6e22fb116b118464cbb36357256f9048d3580632b63af91f63769f7"
-    }
+    "npm:sdk-http-wrapper@1.0.10": "1.0.10"
   },
   "npm": {
-    "@jitl/quickjs-ffi-types@0.31.0": {
-      "integrity": "sha512-1yrgvXlmXH2oNj3eFTrkwacGJbmM0crwipA3ohCrjv52gBeDaD7PsTvFYinlAnqU8iPME3LGP437yk05a2oejw=="
-    },
-    "@jitl/quickjs-wasmfile-debug-asyncify@0.31.0": {
-      "integrity": "sha512-YkdzQdr1uaftFhgEnTRjTTZHk2SFZdpWO7XhOmRVbi6CEVsH9g5oNF8Ta1q3OuSJHRwwT8YsuR1YzEiEIJEk6w==",
-      "dependencies": [
-        "@jitl/quickjs-ffi-types"
-      ]
-    },
-    "@jitl/quickjs-wasmfile-debug-sync@0.31.0": {
-      "integrity": "sha512-8XvloaaWBONqcHXYs5tWOjdhQVxzULilIfB2hvZfS6S+fI4m2+lFiwQy7xeP8ExHmiZ7D8gZGChNkdLgjGfknw==",
-      "dependencies": [
-        "@jitl/quickjs-ffi-types"
-      ]
-    },
-    "@jitl/quickjs-wasmfile-release-asyncify@0.31.0": {
-      "integrity": "sha512-uz0BbQYTxNsFkvkurd7vk2dOg57ElTBLCuvNtRl4rgrtbC++NIndD5qv2+AXb6yXDD3Uy1O2PCwmoaH0eXgEOg==",
-      "dependencies": [
-        "@jitl/quickjs-ffi-types"
-      ]
-    },
-    "@jitl/quickjs-wasmfile-release-sync@0.31.0": {
-      "integrity": "sha512-hYduecOByj9AsAfsJhZh5nA6exokmuFC8cls39+lYmTCGY51bgjJJJwReEu7Ff7vBWaQCL6TeDdVlnp2WYz0jw==",
-      "dependencies": [
-        "@jitl/quickjs-ffi-types"
-      ]
-    },
-    "@types/node@22.5.4": {
-      "integrity": "sha512-FDuKUJQm/ju9fT/SeX/6+gBzoPzlVCzfzmGkwKvRHQVxi4BntVbyIwf6a4Xn62mrvndLiml6z/UBXIdEVjQLXg==",
-      "dependencies": [
-        "undici-types"
-      ]
-    },
     "accepts@1.3.8": {
       "integrity": "sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==",
       "dependencies": [
@@ -367,25 +324,6 @@
         "side-channel"
       ]
     },
-    "quickjs-emscripten-core@0.31.0": {
-      "integrity": "sha512-oQz8p0SiKDBc1TC7ZBK2fr0GoSHZKA0jZIeXxsnCyCs4y32FStzCW4d1h6E1sE0uHDMbGITbk2zhNaytaoJwXQ==",
-      "dependencies": [
-        "@jitl/quickjs-ffi-types"
-      ]
-    },
-    "quickjs-emscripten@0.24.0": {
-      "integrity": "sha512-2F6Trog3fXOIc9pPDEHnsmIs97ACg2MbNzzrwBVN3trwqyZnO0PFJci8ePkjJ2l2J3UIn1k0Sy4yILX+1hZJgw=="
-    },
-    "quickjs-emscripten@0.31.0": {
-      "integrity": "sha512-K7Yt78aRPLjPcqv3fIuLW1jW3pvwO21B9pmFOolsjM/57ZhdVXBr51GqJpalgBlkPu9foAvhEAuuQPnvIGvLvQ==",
-      "dependencies": [
-        "@jitl/quickjs-wasmfile-debug-asyncify",
-        "@jitl/quickjs-wasmfile-debug-sync",
-        "@jitl/quickjs-wasmfile-release-asyncify",
-        "@jitl/quickjs-wasmfile-release-sync",
-        "quickjs-emscripten-core"
-      ]
-    },
     "range-parser@1.2.1": {
       "integrity": "sha512-Hrgsx+orqoygnmhFbKaHE6c296J+HTAQXoxEF6gNupROmmGJRoyzfG3ccAveqCBrwr/2yxQ5BVd/GTl5agOwSg=="
     },
@@ -406,15 +344,6 @@
     },
     "sdk-http-wrapper@1.0.10": {
       "integrity": "sha512-/wKqPH7pi6Yyphqx3E7Kq4P8h/825svZ+Z3favHF5plMEFEMuERHjRaDT5kxnEFGkczyxICqD7WYjZdT4GDZKQ==",
-      "dependencies": [
-        "cors",
-        "dotenv",
-        "express",
-        "node-fetch"
-      ]
-    },
-    "sdk-http-wrapper@1.0.9": {
-      "integrity": "sha512-ecauvIgJwPz04lf235RYXQsTWuWXUbRU+LO7NLn1Cm6OOZ2qUpGYZ2gOQi94zZXr28VkRggh3U35iX3YHfzgyg==",
       "dependencies": [
         "cors",
         "dotenv",
@@ -501,9 +430,6 @@
         "mime-types"
       ]
     },
-    "undici-types@6.19.8": {
-      "integrity": "sha512-ve2KP6f/JnbPBFyobGHuerC9g1FYGn/F8n1LWTwNxCEzd6IfqTwUQcNXgEtmmQ6DlRrC1hrSrBnCZPokRrDHjw=="
-    },
     "unpipe@1.0.0": {
       "integrity": "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ=="
     },
@@ -518,31 +444,16 @@
     }
   },
   "remote": {
-    "https://deno.land/std@0.201.0/async/delay.ts": "a6142eb44cdd856b645086af2b811b1fcce08ec06bb7d50969e6a872ee9b8659",
-    "https://deno.land/std@0.201.0/http/server.ts": "1b2403b3c544c0624ad23e8ca4e05877e65380d9e0d75d04957432d65c3d5f41",
-    "https://esm.sh/@jitl/quickjs-ffi-types@0.31.0/denonext/quickjs-ffi-types.mjs": "963220f5b209e6a89586c995831a212aa9be730d4eed87a420196d9e26badbfe",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-asyncify@0.31.0/denonext/emscripten-module.mjs": "f3de9b2f4c81a003879fed82f5016e97d2309012348fadc55dae360874cc4aed",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-asyncify@0.31.0/denonext/ffi.mjs": "94e234b0064aa984d930a7c20d7d32c69515333b5eab1e857b2c6afe4be48e8e",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-asyncify@0.31.0/denonext/quickjs-wasmfile-debug-asyncify.mjs": "05cc664375c9bbf988b1a46c748cab9a42cfca4f28c9b59919b96f4f413e7a42",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-sync@0.31.0/denonext/emscripten-module.mjs": "0f49e422e458de626a21287b4c5cbc606f2f99eb202729783fdf62a78755b699",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-sync@0.31.0/denonext/ffi.mjs": "b767015fb9665667883309748456beff9b055964a32371c2cafcb88f4a89e325",
-    "https://esm.sh/@jitl/quickjs-wasmfile-debug-sync@0.31.0/denonext/quickjs-wasmfile-debug-sync.mjs": "2bec5b83ea770d61d1add90388ae208ed3474bf6c0544074e9e2c71ce1777807",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-asyncify@0.31.0/denonext/emscripten-module.mjs": "180ee71fdf239f31f179d27ae87c75c98899b2b307bbbcb90e42957289053a16",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-asyncify@0.31.0/denonext/ffi.mjs": "e445eca324c89be2ec2b14f95d951f71bdf14a7e90ff5b9e2c3ebe6abb05a1de",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-asyncify@0.31.0/denonext/quickjs-wasmfile-release-asyncify.mjs": "e4b30017b29bcf0a526b23fd03cde592ff10f4f43187da522260e243f4f74850",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-sync@0.31.0/denonext/emscripten-module.mjs": "42b6a8ef94e803a95e1dbb533a24a88403541de3cf1d630dbcd7c48bb21e2eee",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-sync@0.31.0/denonext/ffi.mjs": "9a8b908b5bd5b4ccafff34bfa6f2ca2008f4995c136d59c81762c82c7cb92007",
-    "https://esm.sh/@jitl/quickjs-wasmfile-release-sync@0.31.0/denonext/quickjs-wasmfile-release-sync.mjs": "b21ae9d014965746dbcc7a9df0e14a5102a1084c2d83e25a3b71f25c3f8f73bd",
-    "https://esm.sh/quickjs-emscripten-core@0.31.0/denonext/dist/module-6F3E5H7Y.mjs": "1ddb8a7644c5a086218779945ff915bc65e8b099dc004f83b4fcd44051da0793",
-    "https://esm.sh/quickjs-emscripten-core@0.31.0/denonext/dist/module-asyncify-R6PWJ6ZV.mjs": "9632ce10037772d7990b6dd229c748798e1d9e3f50f2114d1dd6b833d36374aa",
-    "https://esm.sh/quickjs-emscripten-core@0.31.0/denonext/quickjs-emscripten-core.mjs": "bee54863dbe08c14e9386031b918ee75284d17d9cc605df9c63eaffa388ff173",
-    "https://esm.sh/quickjs-emscripten@0.31.0": "5017d1201779a1c56a23c4fe0b9b40f9da70775ceade9528654031a29956c3e8",
-    "https://esm.sh/quickjs-emscripten@0.31.0/denonext/dist/chunk-OHAYRCBA.mjs": "04486bcadd976202fb0220c899ed521cc44dc1959445e79f48271bd4e4e9cee5",
-    "https://esm.sh/quickjs-emscripten@0.31.0/denonext/quickjs-emscripten.mjs": "5bd93416fea6314e3f4e5423b25d3bc3d2e0d49d43f8d921087e67e1405536ca"
-  },
-  "workspace": {
-    "dependencies": [
-      "npm:quickjs-emscripten@0.24.0"
-    ]
+    "https://deno.land/std@0.177.0/async/abortable.ts": "73acfb3ed7261ce0d930dbe89e43db8d34e017b063cf0eaa7d215477bf53442e",
+    "https://deno.land/std@0.177.0/async/deadline.ts": "c5facb0b404eede83e38bd2717ea8ab34faa2ffb20ef87fd261fcba32ba307aa",
+    "https://deno.land/std@0.177.0/async/debounce.ts": "adab11d04ca38d699444ac8a9d9856b4155e8dda2afd07ce78276c01ea5a4332",
+    "https://deno.land/std@0.177.0/async/deferred.ts": "42790112f36a75a57db4a96d33974a936deb7b04d25c6084a9fa8a49f135def8",
+    "https://deno.land/std@0.177.0/async/delay.ts": "73aa04cec034c84fc748c7be49bb15cac3dd43a57174bfdb7a4aec22c248f0dd",
+    "https://deno.land/std@0.177.0/async/mod.ts": "f04344fa21738e5ad6bea37a6bfffd57c617c2d372bb9f9dcfd118a1b622e576",
+    "https://deno.land/std@0.177.0/async/mux_async_iterator.ts": "70c7f2ee4e9466161350473ad61cac0b9f115cff4c552eaa7ef9d50c4cbb4cc9",
+    "https://deno.land/std@0.177.0/async/pool.ts": "fd082bd4aaf26445909889435a5c74334c017847842ec035739b4ae637ae8260",
+    "https://deno.land/std@0.177.0/async/retry.ts": "5efa3ba450ac0c07a40a82e2df296287b5013755d232049efd7ea2244f15b20f",
+    "https://deno.land/std@0.177.0/async/tee.ts": "47e42d35f622650b02234d43803d0383a89eb4387e1b83b5a40106d18ae36757",
+    "https://deno.land/std@0.177.0/http/server.ts": "cbb17b594651215ba95c01a395700684e569c165a567e4e04bba327f41197433"
   }
 }

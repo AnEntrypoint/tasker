@@ -38,7 +38,7 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
 
   try {
     // Fetch the task from the database
-    logs.push(formatLogMessage('INFO', `Getting task definition for: ${taskId}`));
+    logs.push(formatLogMessage('DEBUG', `Getting task definition for: ${taskId}`));
     const task = await fetchTaskFromDatabase(taskId);
 
     if (!task) {
@@ -50,12 +50,12 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
     }
 
     // Log task information
-    logs.push(formatLogMessage('INFO', `Task found: ${task.name}`));
+    logs.push(formatLogMessage('DEBUG', `Task found: ${task.name}`));
     logs.push(formatLogMessage('DEBUG', `Task code length: ${task.code?.length || 0} bytes`));
     logs.push(formatLogMessage('DEBUG', `Input: ${JSON.stringify(input)}`));
 
     // Execute the task code by sending to QuickJS edge function
-    logs.push(formatLogMessage('INFO', `Preparing execution environment for task ${task.name}`));
+    logs.push(formatLogMessage('DEBUG', `Preparing execution environment for task ${task.name}`));
 
     try {
       // --- Prepare Service Proxy Configuration ---
@@ -261,8 +261,11 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
       const endTime = Date.now();
       logs.push(formatLogMessage('INFO', `Total execution time: ${endTime - startTime}ms`));
 
+      const finalFormattedResult = formatTaskResult(true, result.result, undefined, logs);
+      logs.push(formatLogMessage('DEBUG', `[Executor] Final formatted object before jsonResponse: ${JSON.stringify(finalFormattedResult)}`)); // Log the object
+
       // Return the successful result, including merged logs and execution time
-      return jsonResponse(formatTaskResult(true, result.result, undefined, logs));
+      return jsonResponse(finalFormattedResult); // Use the logged object
 
     } catch (taskError) {
         const errorMsg = `Error during task code execution: ${taskError instanceof Error ? taskError.message : String(taskError)}`;

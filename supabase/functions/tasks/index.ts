@@ -9,7 +9,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { generateSchema, formatSchema } from './services/schema-generator.ts';
 import { parseJSDocComments } from './utils/jsdoc-parser.ts';
 import { GeneratedSchema } from "./types/index.ts";
-import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.9/server";
+import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
 
 config({ export: true });
 
@@ -51,7 +51,7 @@ const tasksService = {
         const response = await executeTask(taskIdentifier, input, options);
         const result = await response.json(); // executeTask returns a Response
         // Extract data and logs from the formatted response
-        return { success: result.success, data: result.output, error: result.error, logs: result.logs };
+        return { success: result.success, data: result.result, error: result.error, logs: result.logs };
       }
     } catch (error) {
       const errorMsg = `[SDK Service] Error executing task ${taskIdentifier}: ${error instanceof Error ? error.message : String(error)}`;
