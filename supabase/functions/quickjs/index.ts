@@ -140,7 +140,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		}
 		const rt = runtime;
 
-		rt.setMemoryLimit(512 * 1024 * 1024); // Doubled memory limit to 512MB
+		rt.setMemoryLimit(8 * 1024 * 1024); // Doubled memory limit to 512MB
 		rt.setMaxStackSize(2 * 1024 * 1024); // Doubled stack size to 2MB
 		// console.log("debug", "host", "Runtime limits set."); // REMOVED
 

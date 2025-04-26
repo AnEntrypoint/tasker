@@ -14,12 +14,10 @@ function getSupabaseUrl(): string {
 
   // Check if the EXT URL points to local development
   if (extSupabaseUrl.includes('localhost') || extSupabaseUrl.includes('127.0.0.1')) {
-    console.log("[wrappedsupabase] Detected local EXT_SUPABASE_URL, using internal Kong URL.");
     return 'http://kong:8000';
   }
 
   // Otherwise, assume it's a deployed URL and use it directly
-  console.log(`[wrappedsupabase] Using provided EXT_SUPABASE_URL: ${extSupabaseUrl}`);
   return extSupabaseUrl;
 }
 
@@ -58,11 +56,6 @@ serve(async (req) => {
         console.error("[wrappedsupabase] Error: EXT_SUPABASE_SERVICE_ROLE_KEY env var not set.");
         throw new Error("Supabase Service Role Key environment variable not found.");
     }
-
-    // Log the key being used (BE CAREFUL WITH LOGGING SECRETS)
-    const keyStart = serviceRoleKey?.substring(0, 10);
-    const keyEnd = serviceRoleKey?.substring(serviceRoleKey.length - 4);
-    console.log(`[wrappedsupabase] Using Service Role Key: ${keyStart}...${keyEnd}`);
 
     // Initialize client using environment variables
     // console.log(`[wrappedsupabase] Initializing client from ENV for URL: ${targetSupabaseUrl}`);
