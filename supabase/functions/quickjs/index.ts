@@ -113,7 +113,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 	try {
 		console.log("info", "host", "Processing request...");
 		const { code, input = {}, modules = {}, serviceProxies = [], runtimeConfig = {} } = await req.json();
-		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 120; // Default 120 seconds (doubled)
+		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 360; // Default 36 seconds (doubled)
 		// Removed verbose debug log of request body details
 		// console.log("debug", "host", "Request body parsed.", [ ... ]); // REMOVED
 		if (typeof code !== "string" || code.trim() === "") { throw new Error("Missing or empty 'code' property"); }
@@ -652,38 +652,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
        // Log VM proxy calls directly - Remove for less noise
        // console.log('[VM] Proxy call:', serviceName + '.' + methodPath.join('.'), 'with args:', args.length); // REMOVED
 
-       // --- Optimizations - Keep these logs --- 
-       if (serviceName === 'openai' && args.length > 0 && args[0] && typeof args[0] === 'object') {
-            if (methodPath.includes('chat') && methodPath.includes('completions') && methodPath.includes('create')) {
-                if (!args[0].max_tokens || args[0].max_tokens > 150) {
-                  args[0].max_tokens = 150;
-                  // console.log('[VM Proxy] Limiting max_tokens to 150 for OpenAI chat completion'); // REMOVED - Less noise
-                }
-                if (!args[0].model || args[0].model.includes('gpt-4')) {
-                  args[0].model = 'gpt-3.5-turbo';
-                  // console.log('[VM Proxy] Using gpt-3.5-turbo model for faster response'); // REMOVED - Less noise
-                }
-                if (args[0].temperature === undefined || args[0].temperature > 0.3) {
-                  args[0].temperature = 0.3;
-                  // console.log('[VM Proxy] Setting temperature to 0.3 for faster response'); // REMOVED - Less noise
-                }
-                if (args[0].messages && Array.isArray(args[0].messages)) {
-                  let hasSystemMessage = false;
-                  for (const msg of args[0].messages) {
-                    if (msg.role === 'system') {
-                      hasSystemMessage = true;
-                      msg.content = msg.content + ' Keep your response very brief and concise.';
-                      break;
-                    }
-                  }
-                  if (!hasSystemMessage) {
-                    args[0].messages.unshift({ role: 'system', content: 'Keep your response very brief and concise.' });
-                  }
-                }
-            }
-       }
-       // ------------------------------------
-
        const requestId = __registerHostRequest__(serviceName, methodPath, args);
        // Log request ID directly - Remove for less noise
        // console.log('[VM] Registered request:', requestId); // REMOVED
@@ -696,7 +664,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
               const result = __checkHostRequestStatus__(requestId);
               if (result.status === 'pending') {
                  // --- OPTIMIZATION: Increase polling interval ---
-                 const interval = attempts < 50 ? 10 : 20; // Increased from 4/8 to 10/20
+                 const interval = 2 ** (4+attempts); // Increased from 4/8 to 10/20
                  if (attempts < maxAttempts) {
                    setTimeout(checkResult, interval);
                  } else {
@@ -785,17 +753,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 					}
 
 					const module = { exports: {} };
-					try {
-						// Use Function constructor - seems necessary for module scope
-						const moduleWrapper = new Function('module', 'exports', 'require', moduleCode);
-						moduleWrapper(module, module.exports, require);
-					} catch (e) {
-						const errMsg = e instanceof Error ? e.message : String(e);
-						const errStack = e instanceof Error ? e.stack : '';
-						// Log error directly
-						console.error('[VM require] Error executing module:', resolvedId, errMsg, errStack);
-						throw new Error('Module execution error in ' + resolvedId + ': ' + errMsg);
-					}
+					// Use Function constructor - seems necessary for module scope
+					const moduleWrapper = new Function('module', 'exports', 'require', moduleCode);
+					moduleWrapper(module, module.exports, require);
 
 					moduleCache[resolvedId] = module.exports;
 					return module.exports;
@@ -972,13 +932,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     try {
                         executionResult = ctx.dump(resultHandleAfterLoop);
 						// Log success concisely
-                        console.log("info", "host", "Successfully dumped __result__.");
+                        //console.log("info", "host", "Successfully dumped __result__.");
 						// Keep preview in debug console only
 						//console.log('[HOST] [DEBUG] Result Preview:', JSON.stringify(executionResult).slice(0, 200) + '...');
                         finalResultHandle = resultHandleAfterLoop;
                     } catch (dumpError: any) {
                         const msg = dumpError?.message || dumpError;
-                        console.log("error", "host", "Failed to DUMP __result__ handle after loop:", [msg]);
+                        //console.log("error", "host", "Failed to DUMP __result__ handle after loop:", [msg]);
                         executionError = `Failed to dump final result: ${msg}`;
                         finalResultHandle = resultHandleAfterLoop;
                     }
@@ -1004,7 +964,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                                 // console.log("warn", "host", "Falling back to initial evalPromise settlement value (unexpected). Dumping..."); // REMOVED Warning
                                 try {
                                     executionResult = ctx.dump(evalResult.value);
-                                    console.log("info", "host", "Successfully dumped initial evalPromise settlement value (used as fallback result).");
+                                    //console.log("info", "host", "Successfully dumped initial evalPromise settlement value (used as fallback result).");
                                     finalResultHandle = evalResult.value;
                                 } catch (dumpError: any) { /* ... error handling ... */ }
                             } else {

@@ -83,53 +83,61 @@ class KeystoreService {
   
   // Store a key value
   async setKey(namespace: string, key: string, value: string): Promise<boolean> {
+    console.log(`[Keystore setKey] Setting key '${key}' in namespace '${namespace}'`);
     try {
-      console.log(`Setting key ${key} in namespace ${namespace} to value: ${value.substring(0, 5)}...`);
-      // Check if the key exists
-      const response = await this.supabase
+      // 1. Check if the key/namespace combination already exists
+      console.log(`[Keystore setKey] Checking existence for ${namespace}/${key}...`);
+      const checkResponse = await this.supabase
         .from('keystore')
-        .select('id')
+        .select('id', { count: 'exact', head: true }) // More efficient check
         .eq('name', key)
         .eq('scope', namespace);
-      
-      const existing = response?.data;
-      const checkError = response?.error;
-      
+
+      // Log the raw check response for debugging
+      // console.log(`[Keystore setKey] Raw check response:`, JSON.stringify(checkResponse));
+
+      const checkError = checkResponse?.error;
+      const count = checkResponse?.count;
+
       if (checkError) {
-        console.error("Check error:", checkError);
+        console.error(`[Keystore setKey] Error checking existing key ${namespace}/${key}:`, checkError);
         throw new Error(`Failed to check existing key: ${checkError.message}`);
       }
-      
-      //console.log(`Existing key check result:`, existing);
-      
-      // Update or insert based on whether the key exists
-      if (existing?.length) {
-        console.log(`Updating existing key ${key} in namespace ${namespace}`);
-        const result = await this.supabase
+
+      console.log(`[Keystore setKey] Found count for ${namespace}/${key}: ${count}`);
+
+      // 2. Update or Insert based on the count
+      let operationResult: any;
+      if (count !== null && count > 0) {
+        // Key exists, perform an UPDATE
+        console.log(`[Keystore setKey] Updating existing key ${namespace}/${key}.`);
+        operationResult = await this.supabase
           .from('keystore')
           .update({ value })
           .eq('name', key)
           .eq('scope', namespace);
-        const updateError = result?.error;
-        if (updateError) {
-          console.error("Update error:", updateError);
-          throw new Error(`Failed to update key: ${updateError.message}`);
-        }
-        return true;
       } else {
-        console.log(`Inserting new key ${key} in namespace ${namespace}`);
-        const result = await this.supabase
+        // Key does not exist, perform an INSERT
+        console.log(`[Keystore setKey] Inserting new key ${namespace}/${key}.`);
+        operationResult = await this.supabase
           .from('keystore')
           .insert({ name: key, value, scope: namespace });
-        const insertError = result?.error;
-        if (insertError) {
-          console.error("Insert error:", insertError);
-          throw new Error(`Failed to insert key: ${insertError.message}`);
-        }
-        return true;
       }
+
+      // 3. Check for errors during the operation
+      const operationError = operationResult?.error;
+      if (operationError) {
+        const action = (count !== null && count > 0) ? 'update' : 'insert';
+        console.error(`[Keystore setKey] Failed to ${action} key ${namespace}/${key}:`, operationError);
+        throw new Error(`Failed to ${action} key: ${operationError.message}`);
+      }
+
+      console.log(`[Keystore setKey] Successfully ${ (count !== null && count > 0) ? 'updated' : 'inserted'} key ${namespace}/${key}.`);
+      return true;
+
     } catch (error) {
-      console.error('Keystore setKey error:', error);
+      console.error(`[Keystore setKey] General error for ${namespace}/${key}:`, error);
+      // Re-throw the error to be handled by the calling function/proxy
       throw error;
     }
   }
