@@ -102,7 +102,7 @@ serve(async (req: Request, connInfo: ConnInfo): Promise<Response> => {
 
         // Check for SDK Wrapper request (has 'chain')
         if (requestBody.chain && Array.isArray(requestBody.chain)) {
-          console.log(`[INFO] Handling SDK wrapper request for tasks service`);
+          //console.log(`[INFO] Handling SDK wrapper request for tasks service`);
           try {
             const result = await executeMethodChain(tasksService, requestBody.chain);
             return new Response(JSON.stringify({ data: result }), { status: 200, headers: corsHeaders });

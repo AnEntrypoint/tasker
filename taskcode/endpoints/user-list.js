@@ -5,7 +5,7 @@
  * @returns {Promise<Array<Object>>} A list of user objects, each containing { email, name }.
  */
 module.exports = async function() {
-  console.log("[simple-user-list-test] Task started.");
+  console.log("[user-list] Task started.");
 
   let customerId = null; // Restore customerId variable
   const allUsers = [];
@@ -13,7 +13,7 @@ module.exports = async function() {
 
   // Ensure tools.gapi is available
   if (!tools || !tools.gapi) {
-      console.error('[simple-user-list-test] tools.gapi proxy is not available!');
+      console.error('[user-list] tools.gapi proxy is not available!');
       throw new Error('Required tools.gapi proxy is missing in the execution environment.');
   }
 
@@ -21,7 +21,7 @@ module.exports = async function() {
   const requiredTools = ['keystore', 'gapi'];
   const missing = requiredTools.filter(tool => !tools[tool]);
   if (missing.length > 0) {
-    console.error(`[simple-user-list-test] Missing required tools: ${missing}. Aborting.`);
+    console.error(`[user-list] Missing required tools: ${missing}. Aborting.`);
     throw new Error(`Missing required tools: ${missing}`);
   }
 
@@ -31,16 +31,16 @@ module.exports = async function() {
 
     if (typeof adminEmailResponse === 'string' && adminEmailResponse.trim() !== '') {
       adminEmail = adminEmailResponse; // <<< ASSIGN adminEmail HERE
-      console.log(`[simple-user-list-test] Retrieved admin email: ${adminEmail}`);
+      console.log(`[user-list] Retrieved admin email: ${adminEmail}`);
     } else {
       console.error(
-        `[simple-user-list-test] GAPI_ADMIN_EMAIL not found in keystore or invalid data. Response: ${JSON.stringify(adminEmailResponse)}`
+        `[user-list] GAPI_ADMIN_EMAIL not found in keystore or invalid data. Response: ${JSON.stringify(adminEmailResponse)}`
       );
       throw new Error("GAPI_ADMIN_EMAIL not found or invalid.");
     }
 
     // 2. Get Customer ID using Admin Email for impersonation
-    console.log(`[simple-user-list-test] Fetching user info for ${adminEmail} to get Customer ID...`);
+    console.log(`[user-list] Fetching user info for ${adminEmail} to get Customer ID...`);
 
     // We need to impersonate the admin user to get their details, including customerId
     const userResponse = await tools.gapi.admin.users.get({
@@ -49,32 +49,32 @@ module.exports = async function() {
       __impersonate: adminEmail // Pass impersonation subject in config
     });
 
-    console.log(`[simple-user-list-test] User info response status: ${userResponse?.status}`); // Add logging for status
+    console.log(`[user-list] User info response status: ${userResponse?.status}`); // Add logging for status
 
     // Check if the response contains the expected data structure
     if (userResponse && userResponse.customerId) {
       customerId = userResponse.customerId;
-      console.log(`[simple-user-list-test] Successfully determined Customer ID: ${customerId}`);
+      console.log(`[user-list] Successfully determined Customer ID: ${customerId}`);
     } else {
-      console.error(`[simple-user-list-test] Could not find Customer ID directly in user info response.`);
-      console.error(`[simple-user-list-test] Full user info response:`, JSON.stringify(userResponse, null, 2)); // Log the full response
+      console.error(`[user-list] Could not find Customer ID directly in user info response.`);
+      console.error(`[user-list] Full user info response:`, JSON.stringify(userResponse, null, 2)); // Log the full response
       throw new Error(`Failed to determine Customer ID: Customer ID not found in users.get response for userKey: ${adminEmail}.`);
     }
 
     // Ensure customerId is set before proceeding
     if (!customerId) {
-      console.error(`[simple-user-list-test] Customer ID is null after attempting to fetch. Aborting.`);
+      console.error(`[user-list] Customer ID is null after attempting to fetch. Aborting.`);
       throw new Error("Customer ID could not be determined.");
     }
 
     // 4. List ALL Users using Customer ID with Pagination
     let pageToken = null;
     let pageCount = 0;
-    console.log(`[simple-user-list-test] Starting fetch for ALL users for customer: ${customerId}...`);
+    console.log(`[user-list] Starting fetch for ALL users for customer: ${customerId}...`);
 
     do {
         pageCount++;
-        console.log(`[simple-user-list-test] Fetching page ${pageCount}... (Token: ${pageToken ? '...' : 'None'})`);
+        console.log(`[user-list] Fetching page ${pageCount}... (Token: ${pageToken ? '...' : 'None'})`);
         try {
             const usersResponse = await tools.gapi.admin.users.list({
                 customer: customerId,
@@ -87,16 +87,16 @@ module.exports = async function() {
             });
 
             if (usersResponse && Array.isArray(usersResponse.users)) {
-                console.log(`[simple-user-list-test] Fetched ${usersResponse.users.length} users on page ${pageCount}.`);
+                console.log(`[user-list] Fetched ${usersResponse.users.length} users on page ${pageCount}.`);
                 allUsers.push(...usersResponse.users); // Add users from this page
                 pageToken = usersResponse.nextPageToken; // Get token for next page
             } else {
-                console.warn(`[simple-user-list-test] No users array found in response on page ${pageCount}. Response: ${JSON.stringify(usersResponse)}`);
+                console.warn(`[user-list] No users array found in response on page ${pageCount}. Response: ${JSON.stringify(usersResponse)}`);
                 pageToken = null; // Stop pagination
             }
 
         } catch (error) {
-            console.error(`[simple-user-list-test] Error listing users on page ${pageCount}:`, error.message);
+            console.error(`[user-list] Error listing users on page ${pageCount}:`, error.message);
             if (error.stack) console.error("User listing stack trace:", error.stack);
             // Decide whether to throw or just log and stop pagination
             // For now, let's throw to indicate a failure during retrieval
@@ -104,13 +104,19 @@ module.exports = async function() {
         }
     } while (pageToken); // Continue if there's a next page token
 
-    console.log(`[simple-user-list-test] Finished fetching users. Total users found: ${allUsers.length} across ${pageCount} page(s).`);
+    console.log(`[user-list] Finished fetching users. Total users found: ${allUsers.length} across ${pageCount} page(s).`);
 
-    // *** Return the consolidated user list on success ***
-    return allUsers;
+    // *** Return only essential fields (primaryEmail, id) ***
+    console.log(`[user-list] Transforming ${allUsers.length} user objects to include only essential fields...`);
+    const essentialUsers = allUsers.map(user => ({
+      primaryEmail: user.primaryEmail,
+      id: user.id
+    }));
+
+    return essentialUsers;
 
   } catch (error) {
-    console.error(`[simple-user-list-test] Task failed: ${error.message}`);
+    console.error(`[user-list] Task failed: ${error.message}`);
     console.error("Stack trace:", error.stack); // Log stack trace for better debugging
     // Ensure adminEmail value is logged if the error occurs after fetching it
     if (adminEmail) {

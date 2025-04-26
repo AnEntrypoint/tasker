@@ -36,7 +36,7 @@ async function runNestedTaskCaller(topic) {
     }
      console.log("\n------- Logs -------");
      if(data?.logs && Array.isArray(data.logs)) {
-         data.logs.forEach(log => console.log(`[${log.timestamp}] [${log.level.toUpperCase()}] ${log.source ? '['+log.source+'] ' : ''}${log.message}${log.data ? ' ' + JSON.stringify(log.data) : ''}`));
+         data.logs.forEach(log => console.log(`${log.source ? '['+log.source+'] ' : ''}${log.message}${log.data ? ' ' + JSON.stringify(log.data) : ''}`));
      } else {
         console.log("No logs available or logs format incorrect.");
      }

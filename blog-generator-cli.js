@@ -15,7 +15,7 @@ const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
 const topic = Deno.args[0];
 
 (async () => {
-  await new Promise((resolve) => setTimeout(resolve, 4000));
+  await new Promise((resolve) => setTimeout(resolve, 4000)); //wait for server start, do not remove
   try {
     console.log(`Using SUPABASE_URL: ${SUPABASE_URL}`);
     console.log(

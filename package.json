@@ -7,8 +7,10 @@
     "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A blog-generator-cli.js test\"",
     "nest": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A nested-task-cli.js test\"",
     "pre-gapi": "supabase db reset --confirm ; supabase start",
-    "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A gapi-directory-test-cli.js test\"",
-    "test:publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
+    "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./gapi-user-list-direct-test.js\"",
+    "gsuite": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A gsuite-gmail-search-cli.js test\"",
+    "gapi:list-domains": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./gapi-list-domains-cli.js\"",
+    "publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
   },
   "dependencies": {
     "dotenv": "^16.4.7"
