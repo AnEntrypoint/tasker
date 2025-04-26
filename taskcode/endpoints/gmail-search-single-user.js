@@ -1,68 +1,76 @@
 /**
  * @task gmail-search-single-user
- * @description Performs a Gmail search for a single specified user and returns the count of matching messages.
+ * @description Performs a Gmail search for a single specified user and returns all message fields (e.g. bcc, subject, etc) for all matching messages, including message id and a direct Gmail link.
  * @param {object} input - The input object.
  * @param {string} input.userEmail - The primary email address of the user to search.
  * @param {string} [input.searchQuery="is:unread"] - The Gmail search query to perform.
- * @param {number} [input.maxMessages=50] - Maximum number of messages to consider for the count (API limit for list is higher).
- * @returns {Promise<object>} - An object containing { success: boolean, messageCount: number } or { success: false, error: string }.
+ * @param {number} [input.maxMessages=50] - Maximum number of messages to consider.
+ * @returns {Promise<object>} - { success: boolean, messageCount: number, messages: array }
  * @throws {Error} If required input 'userEmail' is missing or if the gapi tool is unavailable.
  */
 module.exports = async function execute(input = {}, { tools }) {
   const userEmail = input.userEmail;
   const searchQuery = input.searchQuery || "is:unread";
-  // The client passes maxMessages, but list() can check more efficiently.
-  // Let's use a slightly higher internal limit for list if needed, though client limit might be fine.
-  const maxMessagesToList = input.maxMessages || 50; // Adjust if necessary, client limit is 5.
+  const maxMessagesToList = input.maxMessages || 50;
 
-  if (!userEmail) {
-    throw new Error("[gmail-search-single-user] Required input 'userEmail' is missing.");
-  }
-  if (!tools || !tools.gapi) {
-    throw new Error("[gmail-search-single-user] The 'tools.gapi' proxy is not available in the environment.");
-  }
+  if (!userEmail) throw new Error("[gmail-search-single-user] Required input 'userEmail' is missing.");
+  if (!tools?.gapi) throw new Error("[gmail-search-single-user] The 'tools.gapi' proxy is not available in the environment.");
 
-  console.log(`[gmail-search-single-user] Task started for user: ${userEmail}, Query: "${searchQuery}", MaxList: ${maxMessagesToList}`);
+  // List messages
+  const listResult = await tools.gapi.gmail.users.messages.list({
+    userId: "me",
+    q: searchQuery,
+    maxResults: maxMessagesToList,
+    fields: 'messages/id',
+    __impersonate: userEmail
+  });
 
-  // Helper to extract header value - NO LONGER NEEDED
-  // const getHeader = (headers, name) => { ... };
-
-  // --- Step 1: List messages to get count ---
-  console.log(`[gmail-search-single-user] Listing messages for ${userEmail} to get count...`);
-  const listResult = await tools.gapi
-    .gmail.users.messages.list({
-      userId: "me",
-      q: searchQuery,
-      maxResults: maxMessagesToList, // Limit the list call
-      fields: 'messages/id,resultSizeEstimate', // Request only message IDs to optimize
-      __impersonate: userEmail
-    });
-
-  // Check the structure of listResult - it might contain resultSizeEstimate or just messages array
-  const messageCount = listResult?.messages?.length ?? 0;
-  // const estimatedTotal = listResult?.resultSizeEstimate; // Could use this, but messages.length is definite for the page fetched
-
-  if (!listResult) {
-    console.warn(`[gmail-search-single-user] Received empty listResult for ${userEmail}. Assuming 0 messages.`);
-    return { success: true, messageCount: 0 };
+  if (!listResult?.messages?.length) {
+    return { success: true, messageCount: 0, messages: [] };
   }
 
-  if (messageCount === 0) {
-    console.log(`[gmail-search-single-user] No messages found for ${userEmail} matching query.`);
-    return { success: true, messageCount: 0 }; // Success, 0 messages
-  }
+  const messageIds = listResult.messages.map(m => m.id);
 
-  console.log(`[gmail-search-single-user] Found ${messageCount} messages (up to max ${maxMessagesToList}) for ${userEmail}.`);
+  // Fetch all message fields (full metadata, including bcc, subject, etc)
+  const messages = await Promise.all(
+    messageIds.map(async id => {
+      try {
+        const msg = await tools.gapi.gmail.users.messages.get({
+          userId: "me",
+          id,
+          format: "full",
+          __impersonate: userEmail
+        });
 
-  // --- Step 2: NO LONGER NEEDED - We are not fetching details ---
-  // const messageDetailsList = [];
-  // for (const messageInfo of messageInfos) { ... }
+        // Extract headers as a flat object (case-insensitive)
+        let headers = {};
+        if (msg?.payload?.headers && Array.isArray(msg.payload.headers)) {
+          for (const h of msg.payload.headers) {
+            if (h?.name && h?.value) headers[h.name.toLowerCase()] = h.value;
+          }
+        }
 
-  // console.log(`[gmail-search-single-user] Finished fetching details for ${userEmail}. Found details for ${messageDetailsList.length} messages.`);
+        // Add message id and Gmail web link
+        const messageId = msg?.id || id;
+        const gmailLink = `https://mail.google.com/mail/u/0/#inbox/${messageId}`;
+
+        return {
+          ...msg,
+          id: messageId,
+          gmailLink,
+          headers
+        };
+      } catch (err) {
+        return null;
+      }
+    })
+  );
+
+  const filteredMessages = messages.filter(Boolean);
 
   return {
     success: true,
-    messageCount: messageCount // Return the count directly
+    messageCount: filteredMessages.length,
+    messages: filteredMessages
   };
-
-}; 
+};

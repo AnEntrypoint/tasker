@@ -66,6 +66,84 @@ function getScopesForCall(chain: any[]): string[] {
   return ['https://www.googleapis.com/auth/admin.directory.user.readonly']
 }
 
+// --- Rate Limiting Configuration ---
+const RATE_LIMIT_CONFIG: Record<string, { delayMs: number, key: string }> = {
+  gmail: { delayMs: 100, key: 'gapi_last_call_ts_gmail' }, // ~10 QPS
+  admin: { delayMs: 200, key: 'gapi_last_call_ts_admin' }, // ~5 QPS
+  default: { delayMs: 100, key: 'gapi_last_call_ts_default' }, // Fallback
+  global: { delayMs: 200, key: 'gapi_last_call_ts_global' } // Overall limit (conservative)
+};
+const KEYSTORE_PARTITION = 'rate_limit';
+// --- End Rate Limiting Configuration ---
+
+async function waitIfNeeded(svc: string): Promise<number> {
+  const serviceConfig = RATE_LIMIT_CONFIG[svc] || RATE_LIMIT_CONFIG.default;
+  const globalConfig = RATE_LIMIT_CONFIG.global;
+  // const { delayMs, key } = config; // Removed as we need both configs
+
+  const now = Date.now();
+  let maxWaitTime = 0;
+
+  // Helper to check one limit (service or global)
+  const checkLimit = async (config: { delayMs: number, key: string }, type: string) => {
+    try {
+      const lastCallTsStr = await keystore.getKey(KEYSTORE_PARTITION, config.key);
+      if (lastCallTsStr) {
+        const lastCallTs = parseInt(lastCallTsStr, 10);
+        if (!isNaN(lastCallTs)) {
+          const elapsed = now - lastCallTs;
+          if (elapsed < config.delayMs) {
+            maxWaitTime = Math.max(maxWaitTime, config.delayMs - elapsed);
+          }
+        } else {
+          console.warn(`Invalid timestamp found in keystore for ${type} rate limiting.`);
+        }
+      }
+    } catch (e) {
+      console.error(`Failed to read last call timestamp (${type}) from keystore:`, (e as Error).message);
+      // Proceed cautiously if keystore read fails, don't reset maxWaitTime
+    }
+  };
+
+  // Check both service-specific and global limits
+  await Promise.all([
+    checkLimit(serviceConfig, svc),
+    checkLimit(globalConfig, 'global')
+  ]);
+
+  // Perform wait if necessary
+  if (maxWaitTime > 0) {
+    // Use the longer wait time required by either limit
+    console.log(`Rate limiting: waiting ${maxWaitTime}ms (svc: ${svc}, global: ${globalConfig.delayMs}ms)...`);
+    await new Promise(resolve => setTimeout(resolve, maxWaitTime));
+    return Date.now(); // Return timestamp *after* waiting
+  }
+
+  return now; // Return current time if no wait was needed
+}
+
+async function updateLastCallTimestamp(svc: string, timestamp: number) {
+  const serviceConfig = RATE_LIMIT_CONFIG[svc] || RATE_LIMIT_CONFIG.default;
+  const globalConfig = RATE_LIMIT_CONFIG.global;
+  // const { key } = config; // Removed
+
+  // Helper to update one timestamp
+  const updateTimestamp = async (key: string, type: string) => {
+     try {
+      await keystore.setKey(KEYSTORE_PARTITION, key, timestamp.toString());
+    } catch (e) {
+      // Log error but don't fail the request if keystore update fails
+      console.error(`Failed to update last call timestamp (${type}) in keystore:`, (e as Error).message);
+    }
+  };
+
+  // Update both service-specific and global timestamps
+  await Promise.all([
+      updateTimestamp(serviceConfig.key, svc),
+      updateTimestamp(globalConfig.key, 'global')
+  ]);
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS')
     return new Response(null, { status: 204, headers: corsHeaders })
@@ -87,10 +165,21 @@ serve(async (req) => {
         args = last.args
       }
     }
+
+    const svc = chain[0]?.property;
+    if (!svc || typeof svc !== 'string') {
+      throw new Error('Invalid or missing service in chain');
+    }
+
+    // --- Rate Limiting Start ---
+    const proceedTimestamp = await waitIfNeeded(svc);
+    // Update timestamp *before* the actual GAPI call
+    await updateLastCallTimestamp(svc, proceedTimestamp);
+    // --- Rate Limiting End ---
+
     const user = config.__impersonate || null
     const scopes = getScopesForCall(chain)
     const auth = await getAuthClient(scopes, user)
-    const svc = chain[0]?.property
     let instance: any
     if (svc === 'gmail') instance = google.gmail({ version: 'v1', auth })
     else if (svc === 'admin') instance = google.admin({ version: 'directory_v1', auth })
