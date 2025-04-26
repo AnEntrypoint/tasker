@@ -35,12 +35,12 @@ export async function executeTask(
   options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}
 ): Promise<Response> {
   const startTime = Date.now();
-  console.log(formatLogMessage('INFO', `Task execution started at ${new Date(startTime).toISOString()}`));
-  console.log(formatLogMessage('INFO', `Executing task: ${taskId}`));
+  //console.log(formatLogMessage('INFO', `Task execution started at ${new Date(startTime).toISOString()}`));
+  //console.log(formatLogMessage('INFO', `Executing task: ${taskId}`));
 
   try {
     // Fetch the task from the database
-    console.log(formatLogMessage('DEBUG', `Getting task definition for: ${taskId}`));
+    //console.log(formatLogMessage('DEBUG', `Getting task definition for: ${taskId}`));
     const task = await fetchTaskFromDatabase(taskId);
 
     if (!task) {
@@ -120,33 +120,6 @@ export async function executeTask(
         supabaseUrl: SUPABASE_URL,
         supabaseAnonKey: SUPABASE_ANON_KEY,
       };
-
-      // --- Inject Logging into Task Code (Optional, can be removed if not needed) ---
-      // let taskCode = task.code;
-      // const openAiCallLine = 'await tools.openai.createChatCompletion';
-      // const openAiValidationLine = 'if (!openaiResponse || !openaiResponse.choices'; // Target the validation line
-
-      // if (taskCode.includes(openAiCallLine)) {
-      //     console.log(formatLogMessage('DEBUG', 'Injecting VM logs around OpenAI call...'));
-      //     // Log BEFORE the call
-      //     taskCode = taskCode.replace(
-      //         openAiCallLine,
-      //         `console.log("[VM Task Log] Attempting OpenAI call...");\n    ${openAiCallLine}` // Keep original indentation
-      //     );
-      //     // Log AFTER the call (before validation)
-      //     if (taskCode.includes(openAiValidationLine)) {
-      //        taskCode = taskCode.replace(
-      //            openAiValidationLine,
-      //            `console.log("[VM Task Log] OpenAI call awaited (before validation).");\n    ${openAiValidationLine}` // Keep original indentation
-      //        );
-      //        console.log(formatLogMessage('DEBUG', 'Successfully injected log after OpenAI call.'));
-      //     } else {
-      //        console.log(formatLogMessage('WARN', 'OpenAI validation line not found for injecting log *after* call.'));
-      //     }
-      // } else {
-      //     console.log(formatLogMessage('WARN', 'OpenAI call line not found in task code for log injection.'));
-      // }
-      // -------------------------------------------------------------------------------------
 
       // Call the QuickJS edge function
       //console.log(formatLogMessage('INFO', `Invoking QuickJS function for task ${task.name}...`));

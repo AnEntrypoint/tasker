@@ -31,7 +31,7 @@ const supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 // --- Define the Tasks Service for SDK Wrapper ---
 const tasksService = {
   execute: async (taskIdentifier: string, input: Record<string, unknown> = {}, options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}) => {
-    console.log(`[INFO][SDK Service] Received task execution request for: ${taskIdentifier}`);
+    //console.log(`[INFO][SDK Service] Received task execution request for: ${taskIdentifier}`);
     const logs: string[] = [formatLogMessage('INFO', `[SDK Service] Executing task: ${taskIdentifier}`)];
     try {
       // Check registry first (same logic as direct execution)
