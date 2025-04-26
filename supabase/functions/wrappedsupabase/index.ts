@@ -78,7 +78,7 @@ serve(async (req) => {
     
     if (path.startsWith("/wrappedsupabase/api/proxy/") && req.method === "POST") {
       const service = path.split("/").pop() as string;
-      console.log(`[wrappedsupabase] Handling specific proxy request for service: ${service}`);
+      //console.log(`[wrappedsupabase] Handling specific proxy request for service: ${service}`);
       const body = await req.json();
       const result = await processSdkRequest({ ...body, service }, sdkConfig[service]);
       return new Response(JSON.stringify(result.body), { status: result.status, headers: corsHeaders });
