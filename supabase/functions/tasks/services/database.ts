@@ -70,26 +70,26 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
     return null;
   }
 
-  console.log(`[INFO] Fetching task: ${taskId || taskName}`);
-  console.log(`[DEBUG] Using SUPABASE_URL: ${FUNCTIONS_URL}`);
-  console.log(`[DEBUG] Using KEY: ${KEY!.substring(0, 10)}...`);
+  //console.log(`[INFO] Fetching task: ${taskId || taskName}`);
+  //console.log(`[DEBUG] Using SUPABASE_URL: ${FUNCTIONS_URL}`);
+  //console.log(`[DEBUG] Using KEY: ${KEY!.substring(0, 10)}...`);
 
   try {
     let query = supabase.from('task_functions').select('*');
     
     if (taskId && !isNaN(Number(taskId))) {
-      console.log(`[DEBUG] Querying by ID: ${taskId}`);
+      //console.log(`[DEBUG] Querying by ID: ${taskId}`);
       query = query.eq('id', Number(taskId));
     } else {
       const searchTerm = taskName || taskId || '';
-      console.log(`[DEBUG] Querying by name: ${searchTerm}`);
+      //console.log(`[DEBUG] Querying by name: ${searchTerm}`);
       query = query.eq('name', searchTerm);
     }
     
-    console.log(`[DEBUG] Executing query...`);
+    //console.log(`[DEBUG] Executing query...`);
     const response = await query.limit(1).single();
     
-    console.log(`[DEBUG] Response received:`, JSON.stringify(response, null, 2));
+    //console.log(`[DEBUG] Response received:`, JSON.stringify(response, null, 2));
     
     if (response.error) {
       console.error(`[ERROR] Task lookup failed: ${response.error.message}`);

@@ -13,7 +13,6 @@ import { toFileUrl } from "https://deno.land/std@0.224.0/path/to_file_url.ts";
  * @returns {Promise<Record<string, string>>} Object containing empty 'tasks' and 'tools' module definitions.
  */
 export async function generateModuleCode(_authToken: string, _baseUrl: string): Promise<Record<string, string>> {
-	console.log("[ModuleGen] Generating empty module definitions (code loaded directly by QuickJS).");
 	// Return empty strings. The actual code is in the .js files and loaded by QuickJS.
 	// We might need to return pre-escaped empty strings depending on how the quickjs executor uses this.
 	// Let's start with plain empty strings.

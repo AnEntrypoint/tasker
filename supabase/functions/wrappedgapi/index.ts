@@ -21,10 +21,8 @@ function getSupabaseUrl() {
   const isLocal = Deno.env.get('SUPABASE_EDGE_RUNTIME_IS_LOCAL') === 'true';
   const defaultUrl = Deno.env.get('SUPABASE_URL') ?? 'http://localhost:8000';
   if (isLocal) {
-    console.log('[WrappedGAPI Helper] Detected local env, using Kong URL.');
     return 'http://kong:8000';
   }
-  console.log('[WrappedGAPI Helper] Detected non-local env, using SUPABASE_URL.');
   return defaultUrl;
 }
 
@@ -70,7 +68,7 @@ async function getCredentialsFromKeystore(): Promise<ServiceAccountCredentials> 
       throw new Error('GAPI_KEY (Service Account JSON) not found in keystore.');
     }
 
-    console.log("[WrappedGAPI] Parsing service account JSON...");
+    //console.log("[WrappedGAPI] Parsing service account JSON...");
     const creds: ServiceAccountCredentials = JSON.parse(jsonString);
 
     if (!creds.client_email || !creds.private_key) {
@@ -93,9 +91,9 @@ async function getAuthClient(scope: string | string[], userEmailToImpersonate: s
     // console.log(`[WrappedGAPI getAuthClient] START - Scopes: ${JSON.stringify(scope)}, User: ${userEmailToImpersonate || 'none'}`); // VERBOSE
     const scopesArray = Array.isArray(scope) ? scope.sort() : [scope];
     const scopeKey = scopesArray.join(',');
-    const cacheKey = `${scopeKey}::user:${userEmailToImpersonate || 'none'}`;
+    const cacheKey = `${scopeKey}::user:${userEmailToImpersonate || 'none'}`; 
     // console.log(`[WrappedGAPI getAuthClient] Cache key: ${cacheKey}`); // VERBOSE
-
+    
     if (authClients[cacheKey]) {
         // console.log(`[WrappedGAPI getAuthClient] Reusing cached Auth client for key: ${cacheKey}`); // VERBOSE
         return authClients[cacheKey];
@@ -158,13 +156,14 @@ async function getAuthClient(scope: string | string[], userEmailToImpersonate: s
 // --- End REMOVAL --- 
 
 serve(async (req) => {
+    console.log(req.url)
   if (req.method === 'OPTIONS') {
     console.log("[WrappedGAPI] Handling OPTIONS request.");
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
   const requestUrl = req.url; // Capture for logging
-  console.log(`[WrappedGAPI] Request received { url: "${requestUrl}", method: "${req.method}" }`);
+  //console.log(`[WrappedGAPI] Request received { url: "${requestUrl}", method: "${req.method}" }`);
 
   try {
     // --- REMOVED Initialization Check --- 
@@ -200,7 +199,7 @@ serve(async (req) => {
                 config = { ...config, ...potentialConfigArg }; 
             } else {
                 // Otherwise, all args are actual API args
-                finalCallArgs = lastStep.args;
+            finalCallArgs = lastStep.args;
             }
         }
     }

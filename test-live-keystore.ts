@@ -62,6 +62,7 @@ async function testServiceProxy() {
 }
 
 async function testKeystore() {
+  await new Promise((resolve) => setTimeout(resolve, 4000));
   console.log('=== Testing Live Keystore Service (PRODUCTION) ===');
   console.log('Testing with SDK-HTTP-Wrapper and direct action format');
   

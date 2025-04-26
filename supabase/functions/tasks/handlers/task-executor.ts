@@ -29,42 +29,34 @@ export interface TaskDefinition {
 /**
  * Execute a task with the given name and input
  */
-export async function executeTask(taskId: string, input: Record<string, unknown> = {}, options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}): Promise<Response> {
-  // Create logs array
-  const logs: string[] = [];
+export async function executeTask(
+  taskId: string,
+  input: Record<string, unknown> = {},
+  options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}
+): Promise<Response> {
   const startTime = Date.now();
-  logs.push(formatLogMessage('INFO', `Task execution started at ${new Date(startTime).toISOString()}`));
-  logs.push(formatLogMessage('INFO', `Executing task: ${taskId}`));
+  console.log(formatLogMessage('INFO', `Task execution started at ${new Date(startTime).toISOString()}`));
+  console.log(formatLogMessage('INFO', `Executing task: ${taskId}`));
 
   try {
     // Fetch the task from the database
-    logs.push(formatLogMessage('DEBUG', `Getting task definition for: ${taskId}`));
+    console.log(formatLogMessage('DEBUG', `Getting task definition for: ${taskId}`));
     const task = await fetchTaskFromDatabase(taskId);
 
     if (!task) {
       const errorMsg = `Task not found: ${taskId}`;
       console.error(`[ERROR] ${errorMsg}`);
-      logs.push(formatLogMessage('ERROR', errorMsg));
-      const endTime = Date.now();
-      return jsonResponse(formatErrorResponse(errorMsg, logs), 404);
+      console.log(formatLogMessage('ERROR', errorMsg));
+      return jsonResponse(formatErrorResponse(errorMsg), 404);
     }
-
-    // Log task information
-    logs.push(formatLogMessage('DEBUG', `Task found: ${task.name}`));
-    logs.push(formatLogMessage('DEBUG', `Task code length: ${task.code?.length || 0} bytes`));
-    logs.push(formatLogMessage('DEBUG', `Input: ${JSON.stringify(input)}`));
-
-    // Execute the task code by sending to QuickJS edge function
-    logs.push(formatLogMessage('DEBUG', `Preparing execution environment for task ${task.name}`));
 
     try {
       // --- Prepare Service Proxy Configuration ---
-      logs.push(formatLogMessage('DEBUG', 'Constructing service proxy configurations...'));
       const serviceProxiesConfig = [
         {
           name: 'keystore',
           baseUrl: `${SUPABASE_URL}/functions/v1/wrappedkeystore`,
-          headers: { // Use ANON_KEY as per user instruction
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
@@ -73,7 +65,7 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
         {
           name: 'openai',
           baseUrl: `${SUPABASE_URL}/functions/v1/wrappedopenai`,
-          headers: { // Use standard anon key auth
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
@@ -82,7 +74,7 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
         {
           name: 'supabase',
           baseUrl: `${SUPABASE_URL}/functions/v1/wrappedsupabase`,
-          headers: { // Use standard anon key auth
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
@@ -91,40 +83,35 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
         {
           name: 'websearch',
           baseUrl: `${SUPABASE_URL}/functions/v1/wrappedwebsearch`,
-           headers: { // Use standard anon key auth
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
           }
         },
-        // Add the tasks service proxy configuration
         {
           name: 'tasks',
           baseUrl: `${SUPABASE_URL}/functions/v1/tasks`,
-          headers: { // Use standard anon key auth
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
           }
         },
-        // ---> ADD wrappedgapi HERE <---
         {
-          name: 'gapi', // The name used in QuickJS: tools.gapi
+          name: 'gapi',
           baseUrl: `${SUPABASE_URL}/functions/v1/wrappedgapi`,
-          headers: { // Use standard anon key auth
+          headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
             'apikey': SUPABASE_ANON_KEY
           }
         }
-        // Add more services here as needed
       ];
-      logs.push(formatLogMessage('DEBUG', `Service proxies configured: ${serviceProxiesConfig.map(p => p.name).join(', ')}`));
-
 
       // Generate modules record (currently only 'tasks')
       const modulesRecord = await generateModuleCode(
-        `Bearer ${SUPABASE_ANON_KEY}`, // Pass key for tasks module fetch calls
+        `Bearer ${SUPABASE_ANON_KEY}`,
         SUPABASE_URL
       );
 
@@ -140,7 +127,7 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
       // const openAiValidationLine = 'if (!openaiResponse || !openaiResponse.choices'; // Target the validation line
 
       // if (taskCode.includes(openAiCallLine)) {
-      //     logs.push(formatLogMessage('DEBUG', 'Injecting VM logs around OpenAI call...'));
+      //     console.log(formatLogMessage('DEBUG', 'Injecting VM logs around OpenAI call...'));
       //     // Log BEFORE the call
       //     taskCode = taskCode.replace(
       //         openAiCallLine,
@@ -152,24 +139,24 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
       //            openAiValidationLine,
       //            `console.log("[VM Task Log] OpenAI call awaited (before validation).");\n    ${openAiValidationLine}` // Keep original indentation
       //        );
-      //        logs.push(formatLogMessage('DEBUG', 'Successfully injected log after OpenAI call.'));
+      //        console.log(formatLogMessage('DEBUG', 'Successfully injected log after OpenAI call.'));
       //     } else {
-      //        logs.push(formatLogMessage('WARN', 'OpenAI validation line not found for injecting log *after* call.'));
+      //        console.log(formatLogMessage('WARN', 'OpenAI validation line not found for injecting log *after* call.'));
       //     }
       // } else {
-      //     logs.push(formatLogMessage('WARN', 'OpenAI call line not found in task code for log injection.'));
+      //     console.log(formatLogMessage('WARN', 'OpenAI call line not found in task code for log injection.'));
       // }
       // -------------------------------------------------------------------------------------
 
       // Call the QuickJS edge function
-      logs.push(formatLogMessage('INFO', `Invoking QuickJS function for task ${task.name}...`));
+      //console.log(formatLogMessage('INFO', `Invoking QuickJS function for task ${task.name}...`));
       const quickJsUrl = `${SUPABASE_URL}/functions/v1/quickjs`;
-      logs.push(formatLogMessage('DEBUG', `QuickJS URL: ${quickJsUrl}`));
+      //console.log(formatLogMessage('DEBUG', `QuickJS URL: ${quickJsUrl}`));
 
       // Add a timeout for the fetch call
       const controller = new AbortController();
       // Restore original timeout
-      const timeoutDuration = 90000; // 90 seconds
+      const timeoutDuration = 180000;
       const timeoutId = setTimeout(() => controller.abort(), timeoutDuration);
 
       let response: Response;
@@ -194,23 +181,23 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
       } catch (fetchError) {
         if (fetchError instanceof Error && fetchError.name === 'AbortError') {
             const errorMsg = `QuickJS function call timed out after ${timeoutDuration / 1000} seconds.`;
-            logs.push(formatLogMessage('ERROR', errorMsg));
+            console.log(formatLogMessage('ERROR', errorMsg));
             throw new Error(errorMsg);
         } else {
             const errorMsg = `Fetch error calling QuickJS: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`;
-            logs.push(formatLogMessage('ERROR', errorMsg));
+            console.log(formatLogMessage('ERROR', errorMsg));
             throw fetchError; // Re-throw other fetch errors
         }
       } finally {
         clearTimeout(timeoutId); // Clear the timeout watcher
       }
 
-      logs.push(formatLogMessage('DEBUG', `QuickJS response status: ${response.status}`));
+      console.log(formatLogMessage('DEBUG', `QuickJS response status: ${response.status}`));
 
       const responseBody = await response.text(); // Read body once
 
       if (!response.ok) {
-        logs.push(formatLogMessage('ERROR', `QuickJS execution failed: ${response.status} ${response.statusText} - ${responseBody}`));
+        console.log(formatLogMessage('ERROR', `QuickJS execution failed: ${response.status} ${response.statusText} - ${responseBody}`));
         throw new Error(`QuickJS execution failed: ${response.status} ${response.statusText} - ${responseBody}`);
       }
 
@@ -218,13 +205,13 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
        try {
            result = JSON.parse(responseBody);
        } catch (parseError) {
-           logs.push(formatLogMessage('ERROR', `Failed to parse QuickJS JSON response: ${parseError instanceof Error ? parseError.message : String(parseError)}`));
-           logs.push(formatLogMessage('DEBUG', `Raw QuickJS response body: ${responseBody}`));
+           console.log(formatLogMessage('ERROR', `Failed to parse QuickJS JSON response: ${parseError instanceof Error ? parseError.message : String(parseError)}`));
+           //console.log(formatLogMessage('DEBUG', `Raw QuickJS response body: ${responseBody}`));
            throw new Error('Failed to parse QuickJS JSON response.');
        }
 
        // Log the actual result received from QuickJS before formatting
-       logs.push(formatLogMessage('DEBUG', `Raw QuickJS result.result: ${JSON.stringify(result.result)}`));
+       //console.log(formatLogMessage('DEBUG', `Raw QuickJS result.result: ${JSON.stringify(result.result)}`));
 
        // Merge logs from QuickJS execution
         if (result.logs && Array.isArray(result.logs)) {
@@ -232,44 +219,42 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
                  if (typeof logEntry === 'string') {
                    // Attempt to parse if it looks like our format, otherwise log raw
                      if (logEntry.startsWith('[') && logEntry.includes('] [')) {
-                        logs.push(logEntry); // Assume pre-formatted string
+                        console.log(logEntry); // Assume pre-formatted string
                      } else {
-                        logs.push(formatLogMessage('INFO', `[QuickJS Raw Log] ${logEntry}`));
+                        console.log(formatLogMessage('INFO', `[QuickJS Raw Log] ${logEntry}`));
                      }
                  } else if (logEntry && typeof logEntry === 'object' && logEntry.message) {
-                    logs.push(formatLogMessage(
+                    console.log(formatLogMessage(
                         (logEntry.level?.toUpperCase() as ('INFO'|'ERROR'|'WARN'|'DEBUG')) || 'INFO',
                         `[QuickJS-${logEntry.source?.toUpperCase() || 'VM'}] ${logEntry.message}`,
                          logEntry.data
                      ));
                  } else {
-                     logs.push(formatLogMessage('DEBUG', `[QuickJS JSON Log] ${JSON.stringify(logEntry)}`));
+                     console.log(formatLogMessage('DEBUG', `[QuickJS JSON Log] ${JSON.stringify(logEntry)}`));
                  }
             });
         }
 
       if (!result.success) {
          const errorMsg = `QuickJS execution reported failure: ${result.error || 'Unknown error'}`;
-         logs.push(formatLogMessage('ERROR', errorMsg));
+         console.log(formatLogMessage('ERROR', errorMsg));
          if (result.errorDetails) { // Include details if provided by QuickJS
-             logs.push(formatLogMessage('ERROR', `QuickJS error details: ${JSON.stringify(result.errorDetails)}`));
+             console.log(formatLogMessage('ERROR', `QuickJS error details: ${JSON.stringify(result.errorDetails)}`));
          }
          throw new Error(errorMsg);
        }
 
-      logs.push(formatLogMessage('INFO', `Task ${task.name} executed successfully.`));
+      console.log(formatLogMessage('INFO', `Task ${task.name} executed successfully.`));
       const endTime = Date.now();
-      logs.push(formatLogMessage('INFO', `Total execution time: ${endTime - startTime}ms`));
+      console.log(formatLogMessage('INFO', `Total execution time: ${endTime - startTime}ms`));
 
-      const finalFormattedResult = formatTaskResult(true, result.result, undefined, logs);
-      logs.push(formatLogMessage('DEBUG', `[Executor] Final formatted object before jsonResponse: ${JSON.stringify(finalFormattedResult)}`)); // Log the object
-
+      const finalFormattedResult = formatTaskResult(true, result.result, undefined);
       // Return the successful result, including merged logs and execution time
       return jsonResponse(finalFormattedResult); // Use the logged object
 
     } catch (taskError) {
         const errorMsg = `Error during task code execution: ${taskError instanceof Error ? taskError.message : String(taskError)}`;
-        logs.push(formatLogMessage('ERROR', errorMsg));
+        console.log(formatLogMessage('ERROR', errorMsg));
         // Re-throw to be caught by outer handler - Let outer handler manage final response formatting
         throw taskError;
     }
@@ -279,11 +264,11 @@ export async function executeTask(taskId: string, input: Record<string, unknown>
       console.error(`[ERROR] ${errorMsg}`);
       if (error instanceof Error && error.stack) {
           console.error(`[ERROR] Stack trace: ${error.stack}`);
-          logs.push(formatLogMessage('ERROR', `Stack: ${error.stack}`)); // Add stack to logs
+          console.log(formatLogMessage('ERROR', `Stack: ${error.stack}`)); // Add stack to logs
       }
-      logs.push(formatLogMessage('ERROR', errorMsg));
+      console.log(formatLogMessage('ERROR', errorMsg));
       const endTime = Date.now();
-      return jsonResponse(formatErrorResponse(errorMsg, logs), 500);
+      return jsonResponse(formatErrorResponse(errorMsg), 500);
   }
 }
 

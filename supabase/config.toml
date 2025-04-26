@@ -258,7 +258,9 @@ enabled = false
 
 [edge_runtime]
 enabled = true
-# Configure edge runtime policy for production use
+# Configure the request handling policy for Edge Functions. Available options:
+# - `oneshot`: Recommended for development with hot reload support
+# - `per_worker`: Recommended for load testing scenarios
 policy = "per_worker"
 # Port to attach the Chrome inspector for debugging edge functions.
 inspector_port = 8083

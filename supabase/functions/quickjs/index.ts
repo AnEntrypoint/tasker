@@ -1,4 +1,4 @@
-console.log("[Host Pre-Init] Loading quickjs/index.ts...");
+// console.log("[Host Pre-Init] Loading quickjs/index.ts...");
 
 import { corsHeaders } from "./cors.ts";
 import {
@@ -11,12 +11,9 @@ import {
 } from "quickjs-emscripten";
 import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
 
-console.log("[Host Pre-Init] Imports completed for quickjs/index.ts.");
-
-console.log("[Host] Starting QuickJS function initialization...");
+// console.log("[Host Pre-Init] Imports completed for quickjs/index.ts.");
 
 interface LogEntry {
-	timestamp: string;
 	level: "log" | "error" | "warn" | "info" | "debug";
 	message: string;
 	source: "host" | "vm";
@@ -67,7 +64,7 @@ function createHandleFromJson(context: QuickJSContext, jsValue: any, handles: Qu
 	}
 }
 
-function createHandleFromJsonNoTrack(context: QuickJSAsyncContext, jsValue: any): QuickJSHandle {
+function createHandleFromJsonNoTrack(context: QuickJSAsyncContext, jsValue: any, handles?: QuickJSHandle[] /* Optional tracking */): QuickJSHandle {
 	const jsonString = simpleStringify(jsValue);
 	const evalResult = context.evalCode(`JSON.parse(${JSON.stringify(jsonString)})`);
 	if (evalResult.error) {
@@ -75,6 +72,7 @@ function createHandleFromJsonNoTrack(context: QuickJSAsyncContext, jsValue: any)
 		evalResult.error.dispose();
 		return context.undefined;
 	}
+	if (handles) handles.push(evalResult.value); // Track handle if array provided
 	return evalResult.value;
 }
 
@@ -95,23 +93,11 @@ async function callNestedHostProxy(proxy: any, chain: string[], args: any[]): Pr
 	const finalResult = await finalProxy;
 	// Avoid logging potentially large results even at debug
 	// console.log(`[Host Helper] Final result received:`, finalResult); // POTENTIALLY LARGE
-	// addLog("debug", "host", `[Host Helper] Final result received for chain ${chain.join('.')}. Type: ${typeof finalResult}`); // Removed - addLog not defined here
+	// console.log("debug", "host", `[Host Helper] Final result received for chain ${chain.join('.')}. Type: ${typeof finalResult}`); // Removed - console.log not defined here
 	return finalResult; // Ensure function returns
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {
-	const logs: LogEntry[] = [];
-	const addLog = (level: LogEntry["level"], source: "host" | "vm", message: string, data?: any[]) => {
-		// Only push logs of level 'info' or higher, or 'error'
-		// Keep 'debug' logs in console output only for local debugging if needed
-		if (level === 'info' || level === 'warn' || level === 'error') {
-		logs.push({ timestamp: new Date().toISOString(), level, source, message, data });
-		}
-		// Always log to console for visibility during development/debugging
-		// Use console.debug for debug level to potentially allow filtering
-		const consoleMethod = level === 'debug' ? console.debug : (level === 'error' ? console.error : (level === 'warn' ? console.warn : console.log));
-		consoleMethod(`[${source.toUpperCase()}] [${level.toUpperCase()}] ${message}`, ...(data || []));
-	};
 
 	if (req.method === "OPTIONS") { console.log("[Host] Responding to OPTIONS request"); return new Response("ok", { headers: corsHeaders }); }
 
@@ -124,31 +110,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
 	const hostProxies: { [key: string]: any } = {}; // Store actual host proxies here
 
 	// Define startTimestamp here so it's accessible in finally block
-	const startTimestamp = Date.now();
-
 	try {
-		addLog("info", "host", "Processing request...");
+		console.log("info", "host", "Processing request...");
 		const { code, input = {}, modules = {}, serviceProxies = [], runtimeConfig = {} } = await req.json();
 		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 120; // Default 120 seconds (doubled)
-		addLog("debug", "host", "Request body parsed.", [
-			`Code length: ${code?.length}`,
-			`Input keys: ${Object.keys(input)}`,
-			`Service Proxies: ${serviceProxies.map((p:any) => p.name).join(', ')}`,
-			`Timeout: ${executionTimeoutSeconds}s`
-		]);
+		// Removed verbose debug log of request body details
+		// console.log("debug", "host", "Request body parsed.", [ ... ]); // REMOVED
 		if (typeof code !== "string" || code.trim() === "") { throw new Error("Missing or empty 'code' property"); }
 		if (!Array.isArray(serviceProxies)) { throw new Error("'serviceProxies' must be an array"); }
 		if (!runtimeConfig || !runtimeConfig.supabaseUrl || !runtimeConfig.supabaseAnonKey) {
-			addLog("error", "host", "Missing critical runtimeConfig properties (supabaseUrl, supabaseAnonKey)", [runtimeConfig]);
+			console.log("error", "host", "Missing critical runtimeConfig properties (supabaseUrl, supabaseAnonKey)", [runtimeConfig]);
 			throw new Error("Missing critical runtimeConfig properties");
 		}
 
 		// Reduce verbosity - initializing QuickJS is expected
-		addLog("debug", "host", "Initializing QuickJS WASM module...");
+		// console.log("debug", "host", "Initializing QuickJS WASM module..."); // REMOVED
 		const quickjs = await getQuickJS();
-		addLog("debug", "host", "QuickJS WASM module initialized.");
+		// console.log("debug", "host", "QuickJS WASM module initialized."); // REMOVED
 
-		addLog("debug", "host", "Setting up QuickJS Async context...");
+		//console.log("debug", "host", "Setting up QuickJS Async context...");
 		context = await newAsyncContext();
 		if (!context) {
 			throw new Error("Failed to create QuickJSAsyncContext");
@@ -162,50 +142,66 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 		rt.setMemoryLimit(512 * 1024 * 1024); // Doubled memory limit to 512MB
 		rt.setMaxStackSize(2 * 1024 * 1024); // Doubled stack size to 2MB
-		addLog("debug", "host", "Runtime limits set.");
+		// console.log("debug", "host", "Runtime limits set."); // REMOVED
 
 		// --- Create Host-Side Service Proxies ---
-		addLog("debug", "host", "Creating host-side service proxies...");
+		// console.log("debug", "host", "Creating host-side service proxies..."); // REMOVED
 		try {
 			for (const proxyConfig of serviceProxies) {
 				if (!proxyConfig.name || !proxyConfig.baseUrl) {
-					addLog("warn", "host", "Skipping invalid service proxy config (missing name or baseUrl)", [proxyConfig]);
+					console.log("warn", "host", "Skipping invalid service proxy config (missing name or baseUrl)", [proxyConfig]);
 					continue;
 				}
 				hostProxies[proxyConfig.name] = createServiceProxy(proxyConfig.name, {
 					baseUrl: proxyConfig.baseUrl,
 				headers: proxyConfig.headers || {},
 				});
-				addLog("debug", "host", `Created host proxy for '${proxyConfig.name}'`);
+				// console.log("debug", "host", `Created host proxy for '${proxyConfig.name}'`); // REMOVED
 			}
 		} catch (proxyError) {
-			addLog("error", "host", "Error creating host service proxies", [proxyError]);
+			console.log("error", "host", "Error creating host service proxies", [proxyError]);
 			throw new Error(`Failed to create service proxies: ${proxyError instanceof Error ? proxyError.message : String(proxyError)}`);
 		}
 
 		// --- Inject Globals ---
 
 		// Console Patch
-		addLog("debug", "host", "Injecting globals (console, config, input, fetch, timers, tools, require)...");
+		// console.log("debug", "host", "Injecting globals (console, config, input, fetch, timers, tools, require)..."); // REMOVED
 		const consoleHandle = ctx.newObject(); handles.push(consoleHandle);
 
 		// Define ONE function factory for all console levels
 		const logFn = (level: LogEntry["level"]) => ctx.newFunction(level, (...argsHandles: QuickJSHandle[]) => {
 			// Only log to host console, don't add to returned logs unless it's an error
 			try {
-				const args = argsHandles.map(h => ctx.dump(h));
+				// --- OPTIMIZATION: Only dump args for errors ---
 				if (level === 'error') {
+					const args = argsHandles.map(h => ctx.dump(h));
 					// Add VM errors to the main logs
-					addLog(level, "vm", `console.error`, args);
+					console.log(level, "vm", `console.error`, args);
 				} else {
-					// Log other levels only to the host console for debugging
-					console.log(`[VM] [${level.toUpperCase()}]`, ...args);
+					// --- OPTIMIZATION: Assume first arg is string for non-errors, skip typeof ---
+					// For other levels, log only the first argument if it's a string (the message)
+					// This avoids potentially expensive dumping of complex objects for info/debug logs
+					let message = `[VM] [${level.toUpperCase()}]`;
+					try {
+						if (argsHandles.length > 0) {
+							// Directly try getString, catch if it fails (e.g., not a string)
+							message += ` ${ctx.getString(argsHandles[0])}`;
+						}
+					} catch (_e) {
+						// Ignore error if first arg wasn't a string
+						if (argsHandles.length > 0) {
+							message += ` (Non-string first arg)`;
+						}
+					}
+					// Log other levels only to the host console for debugging - comment out by default
+					// console.log(message); // REMOVED
 				}
 			} catch (e) {
 				// Log errors during the dump itself to host console and potentially main logs
 				const errorMsg = e instanceof Error ? e.message : String(e);
 				console.error(`[HOST] [ERROR] Error during console.${level} dump`, errorMsg);
-				addLog("error", "host", `Error during console.${level} dump`, [errorMsg]);
+				console.log("error", "host", `Error during console.${level} dump`, [errorMsg]);
 			}
 		});
 
@@ -227,11 +223,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		ctx.setProp(ctx.global, "console", consoleHandle);
 
 		// Runtime Config
-		const injectedRuntimeConfigHandle = createHandleFromJsonNoTrack(ctx, runtimeConfig); handles.push(injectedRuntimeConfigHandle);
+		const injectedRuntimeConfigHandle = createHandleFromJsonNoTrack(ctx, runtimeConfig, handles); handles.push(injectedRuntimeConfigHandle);
 		ctx.setProp(ctx.global, "__runtimeConfig__", injectedRuntimeConfigHandle);
 
 		// Input
-		const inputObjectHandle = createHandleFromJsonNoTrack(ctx, input); handles.push(inputObjectHandle);
+		const inputObjectHandle = createHandleFromJsonNoTrack(ctx, input, handles); handles.push(inputObjectHandle);
 		ctx.setProp(ctx.global, "__input__", inputObjectHandle);
 
 		// Fetch Patch (uses Deno fetch)
@@ -268,7 +264,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 						console.error("[HOST] [ERROR] [fetch Patch] Exception during executePendingJobs after fetch promise settlement:", jobError);
 					}
 				} else {
-					console.warn("[HOST] [WARN] [fetch Patch] Runtime disposed before executePendingJobs after fetch promise settlement.");
+					// console.warn("[HOST] [WARN] [fetch Patch] Runtime disposed before executePendingJobs after fetch promise settlement."); // REMOVED Warning
 				}
 			};
 			deferred.settled.then(runPendingJobs);
@@ -279,11 +275,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			try {
 				url = ctx.getString(urlHandle);
 				options = optionsHandle ? ctx.dump(optionsHandle) : {};
-				// Log VM fetch calls directly
-				console.log(`[VM] fetch called: ${url}`, options);
+				// Log VM fetch calls directly - remove for less noise
+				// console.log(`[VM] fetch called: ${url}`, options); // REMOVED
 			} catch (dumpError) {
 				if (!ctx?.alive || !deferred.handle.alive) return deferred.handle;
-				const dumpErrorHandle = createHandleFromJsonNoTrack(ctx, dumpError);
+				const dumpErrorHandle = createHandleFromJsonNoTrack(ctx, dumpError, handles);
 				handles.push(dumpErrorHandle);
 				deferred.reject(dumpErrorHandle);
 				return deferred.handle;
@@ -297,18 +293,38 @@ Deno.serve(async (req: Request): Promise<Response> => {
 				}
 				const localHandles: QuickJSHandle[] = []; // Handles for this async block
 				try {
-					const r = ctx.newObject(); localHandles.push(r);
-					const statusNum = ctx.newNumber(response.status); localHandles.push(statusNum); ctx.setProp(r, "status", statusNum);
-					const statusTextStr = ctx.newString(response.statusText); localHandles.push(statusTextStr); ctx.setProp(r, "statusText", statusTextStr);
-					ctx.setProp(r, "ok", response.ok ? ctx.true : ctx.false);
-					const urlStr = ctx.newString(response.url); localHandles.push(urlStr); ctx.setProp(r, "url", urlStr);
-					// Process Headers
-					const h = ctx.newObject(); localHandles.push(h);
-					for (const [k, v] of response.headers.entries()){
-						const vh = ctx.newString(v); localHandles.push(vh);
-						ctx.setProp(h, k, vh);
+					// --- OPTIMIZATION: Use evalCode to create base response object --- 
+					const responseEvalResult = ctx.evalCode(`({
+						status: ${response.status},
+						statusText: ${JSON.stringify(response.statusText)},
+						ok: ${response.ok},
+						url: ${JSON.stringify(response.url)}
+					})`);
+					if (responseEvalResult.error) {
+						localHandles.push(responseEvalResult.error);
+						throw new Error(`Fetch response object creation failed: ${ctx.dump(responseEvalResult.error)}`);
 					}
+					const r = responseEvalResult.value; // This is our base response handle
+					localHandles.push(r);
+					// ----------------------------------------------------------------
+
+					// --- OPTIMIZATION: Process Headers using JSON stringify/parse ---
+					const headersObj: { [key: string]: string } = {};
+					for (const [k, v] of response.headers.entries()) {
+						headersObj[k] = v;
+					}
+					const headersJson = simpleStringify(headersObj);
+					const headersEvalResult = ctx.evalCode(`JSON.parse(${JSON.stringify(headersJson)})`);
+					if (headersEvalResult.error) {
+						const errDump = ctx.dump(headersEvalResult.error);
+						headersEvalResult.error.dispose();
+						throw new Error(`Fetch headers object creation failed: ${errDump}`);
+					}
+					const h = headersEvalResult.value;
+					localHandles.push(h);
+					// -------------------------------------------------------------
 					ctx.setProp(r, "headers", h);
+
 					// Body methods need to be functions that return handles
 					const bodyText = await response.text(); // Read body once
 					const textFn = ctx.newFunction('text', () => {
@@ -340,12 +356,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 					if (ctx?.alive && deferred.handle.alive) {
 						// Reduce verbosity
-						// addLog("debug", "host", "[fetch Patch] Resolving VM promise.");
+						// console.log("debug", "host", "[fetch Patch] Resolving VM promise.");
 						deferred.resolve(responseHandle);
 						try {
 							if (rt?.alive) {
 								// Reduce verbosity
-								// addLog("debug", "host", "[fetch Patch] Running pending jobs after resolve.");
+								// console.log("debug", "host", "[fetch Patch] Running pending jobs after resolve.");
 								const jobResult = rt.executePendingJobs();
 								if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
 							} else {
@@ -358,15 +374,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 						console.warn("[HOST] [WARN] [fetch Patch] Context/Promise disposed before resolving.");
 					}
 				} catch (processError) {
-					addLog("error", "host", "[fetch Patch] Error processing fetch response", [processError]);
+					console.log("error", "host", "[fetch Patch] Error processing fetch response", [processError]);
 					if (ctx?.alive && deferred.handle.alive) {
-						const errorHandle = createHandleFromJsonNoTrack(ctx, processError);
+						const errorHandle = createHandleFromJsonNoTrack(ctx, processError, handles);
 						handles.push(errorHandle);
 						deferred.reject(errorHandle);
 						try {
 							if (rt?.alive) {
 								// Reduce verbosity
-								// addLog("debug", "host", "[fetch Patch] Running pending jobs after reject (processing error).");
+								// console.log("debug", "host", "[fetch Patch] Running pending jobs after reject (processing error).");
 								const jobResult = rt.executePendingJobs();
 								if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
 							} else {
@@ -382,15 +398,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
 					localHandles.forEach(h => { if (h?.alive) h.dispose(); });
 				}
 			}).catch(networkError => {
-				addLog("error", "host", `[fetch Patch] Network error during fetch for ${url}`, [networkError]);
+				console.log("error", "host", `[fetch Patch] Network error during fetch for ${url}`, [networkError]);
 				if (ctx?.alive && deferred.handle.alive) {
-					const errorHandle = createHandleFromJsonNoTrack(ctx, networkError);
+					const errorHandle = createHandleFromJsonNoTrack(ctx, networkError, handles);
 					handles.push(errorHandle);
 					deferred.reject(errorHandle);
 					try {
 						if (rt?.alive) {
 							// Reduce verbosity
-							// addLog("debug", "host", "[fetch Patch] Running pending jobs after reject (network error).");
+							// console.log("debug", "host", "[fetch Patch] Running pending jobs after reject (network error).");
 							const jobResult = rt.executePendingJobs();
 							if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
 						} else {
@@ -412,7 +428,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		ctx.setProp(ctx.global, "fetch", fetchHandle);
 
 		// --- Timer Injection ---
-		addLog("debug", "host", "Injecting setTimeout and clearTimeout...");
+		// console.log("debug", "host", "Injecting setTimeout and clearTimeout..."); // REMOVED
 		const activeTimers = new Map<number, number>();
 		let nextVmTimerId = 1;
 
@@ -433,40 +449,54 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			const vmTimerId = nextVmTimerId++;
 
 			const persistentCallbackHandle = callbackHandle.dup();
-			handles.push(persistentCallbackHandle);
+			// --- OPTIMIZATION: Don't add setTimeout handles to global list ---
+			// handles.push(persistentCallbackHandle); // REMOVED from global tracking
 			const persistentArgsHandles = argsHandles.map(arg => {
 				const dupArg = arg.dup();
-				handles.push(dupArg);
+				// handles.push(dupArg); // REMOVED from global tracking
 				return dupArg;
 			});
 
 			const hostTimerId = setTimeout(() => {
+				activeTimers.delete(vmTimerId); // Delete timer ID immediately
+
 				if (!ctx?.alive || !rt?.alive || !persistentCallbackHandle.alive) {
 					// Reduce verbosity
 					// console.warn(`[HOST] [WARN] [setTimeout Callback ${vmTimerId}] Runtime/Context/Callback disposed before execution.`);
-					activeTimers.delete(vmTimerId);
+					// --- Dispose handles locally --- 
+					if (persistentCallbackHandle?.alive) persistentCallbackHandle.dispose();
 					persistentArgsHandles.forEach(h => { if (h?.alive) h.dispose(); });
 					return;
 				}
 				// Reduce verbosity
 				// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Executing...`);
-				const result = ctx.callFunction(persistentCallbackHandle, ctx.undefined, ...persistentArgsHandles);
-
-				persistentCallbackHandle.dispose();
-				persistentArgsHandles.forEach(h => { if (h?.alive) h.dispose(); });
-
-				activeTimers.delete(vmTimerId);
-
-				if (result.error) {
-					const errorDump = ctx.dump(result.error);
-					addLog("error", "vm", `[setTimeout Callback ${vmTimerId}] Error during execution:`, [errorDump]);
-					result.error.dispose();
-				} else {
-					// Reduce verbosity
-					// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Execution finished. Disposing result.`);
-					result.value.dispose();
+				let result: { value?: QuickJSHandle, error?: QuickJSHandle } | null = null;
+				try {
+					result = ctx.callFunction(persistentCallbackHandle, ctx.undefined, ...persistentArgsHandles);
+				} catch (callError) {
+					console.log("error", "vm", `[setTimeout Callback ${vmTimerId}] Exception during callFunction:`, [callError]);
+					// Ensure handles are disposed even if callFunction throws
+				} finally {
+					// --- Dispose handles locally --- 
+					if (persistentCallbackHandle?.alive) persistentCallbackHandle.dispose();
+					persistentArgsHandles.forEach(h => { if (h?.alive) h.dispose(); });
 				}
 
+				// Process result after handles are disposed (if result exists)
+				if (result) {
+					if (result.error) {
+						// Only dump error if context is still alive
+						const errorDump = ctx?.alive ? ctx.dump(result.error) : "Context disposed";
+						console.log("error", "vm", `[setTimeout Callback ${vmTimerId}] Error during execution:`, [errorDump]);
+						if (result.error.alive) result.error.dispose(); // Dispose error handle
+					} else {
+						// Reduce verbosity
+						// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Execution finished. Disposing result.`);
+						if (result.value?.alive) result.value.dispose(); // Dispose success handle
+					}
+				}
+
+				// Job execution after callback
 				try {
 					if (rt?.alive) {
 						// Reduce verbosity
@@ -505,7 +535,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 				// console.log(`[VM] clearTimeout cleared timer ${vmTimerId} (Host ID: ${hostTimerId})`);
 			} else {
 				// Log warning directly
-				console.warn(`[VM] [WARN] [clearTimeout] Timer ID ${vmTimerId} not found or already cleared.`);
+				// console.warn(`[VM] [WARN] [clearTimeout] Timer ID ${vmTimerId} not found or already cleared.`);
 			}
 		};
 
@@ -518,24 +548,27 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		handles.push(clearTimeoutHandle);
 		ctx.setProp(ctx.global, "clearTimeout", clearTimeoutHandle);
 
-		addLog("debug", "host", "setTimeout and clearTimeout injected.");
+		// console.log("debug", "host", "setTimeout and clearTimeout injected."); // REMOVED
 		// --- End Timer Injection ---
 
 		// Placeholder module object - Reduced verbosity
-		addLog("debug", "host", "Injecting placeholder module object...");
+		// console.log("debug", "host", "Injecting placeholder module object..."); // REMOVED
 		const moduleObjHandle = ctx.newObject(); handles.push(moduleObjHandle);
 		ctx.setProp(moduleObjHandle, "exports", ctx.undefined);
 		ctx.setProp(ctx.global, "module", moduleObjHandle);
 
 		// --- Tools Injection --- (Polling based)
-		addLog("debug", "host", "Injecting 'tools' object and request polling functions...");
+		// console.log("debug", "host", "Injecting 'tools' object and request polling functions..."); // REMOVED
 		const toolsHandle = ctx.newObject(); handles.push(toolsHandle);
 		ctx.setProp(ctx.global, "tools", toolsHandle);
 
 		// --- Request tracking system --- No change needed here, logs are internal
 		const pendingRequests = new Map();
 		let requestCounter = 0;
-		function generateRequestId() { return `req_${Date.now()}_${requestCounter++}`; }
+		function generateRequestId() {
+			// --- OPTIMIZATION: Remove Date.now() if only per-invocation uniqueness needed ---
+			return `req_${requestCounter++}`;
+		}
 
 		// --- Inject __registerHostRequest__ function --- No change needed here, logs are internal
 		const registerHostRequestFn = (serviceNameHandle: QuickJSHandle, propChainHandle: QuickJSHandle, argsHandle: QuickJSHandle) => {
@@ -552,12 +585,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			if (propChain.every(item => typeof item === 'string')) { methodChain = propChain; }
 			else { methodChain = propChain.map(item => typeof item === 'object' && item !== null && 'property' in item ? item.property : String(item)); }
 
-			// Log registration directly
-			console.log(`[HOST] [DEBUG] Registering host request: ${requestId} for ${serviceName}.${methodChain.join('.')} with ${args.length} args`);
+			// Log registration directly - Removed for less noise
+			// console.log(`[HOST] [DEBUG] Registering host request: ${requestId} for ${serviceName}.${methodChain.join('.')} with ${args.length} args`); // REMOVED
 			pendingRequests.set(requestId, { status: 'pending' });
 			const proxy = hostProxies[serviceName];
 			if (!proxy) {
-				addLog("error", "host", `Host proxy not found for service: ${serviceName}`);
+				console.log("error", "host", `Host proxy not found for service: ${serviceName}`);
 				pendingRequests.set(requestId, { status: 'rejected', error: `Host proxy not found for service: ${serviceName}` });
 				return ctx.newString(requestId);
 			}
@@ -568,7 +601,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 				})
 				.catch(error => {
 					const message = error instanceof Error ? error.message : String(error);
-					addLog("error", "host", `Request ${requestId} rejected for ${serviceName}.${methodChain.join('.')}: ${message}`);
+					console.log("error", "host", `Request ${requestId} rejected for ${serviceName}.${methodChain.join('.')}: ${message}`);
 					pendingRequests.set(requestId, { status: 'rejected', error: message });
 					});
 			return ctx.newString(requestId);
@@ -587,7 +620,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			const statusHandle = ctx.newString(request.status); handles.push(statusHandle);
 			ctx.setProp(resultHandle, 'status', statusHandle);
 			if (request.status === 'fulfilled') {
-				const valueHandle = createHandleFromJsonNoTrack(ctx, request.value);
+				const valueHandle = createHandleFromJsonNoTrack(ctx, request.value, handles);
 				handles.push(valueHandle);
 				ctx.setProp(resultHandle, 'value', valueHandle);
 				pendingRequests.delete(requestId);
@@ -606,33 +639,33 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		const checkHostRequestStatusHandle = ctx.newFunction('__checkHostRequestStatus__', checkHostRequestStatusFn);
 		handles.push(checkHostRequestStatusHandle);
 		ctx.setProp(ctx.global, "__checkHostRequestStatus__", checkHostRequestStatusHandle);
-		addLog("debug", "host", "Polling functions injected.");
+		// console.log("debug", "host", "Polling functions injected."); // REMOVED
 
 		// --- Populate VM 'tools' object --- Reduced verbosity
-		addLog("debug", "host", "Populating VM 'tools' object with service proxies...");
+		// console.log("debug", "host", "Populating VM 'tools' object with service proxies..."); // REMOVED
 		const vmProxyGeneratorCode = `
 (serviceName) => {
   function createPropertyProxy(path = []) {
     const baseFunction = function(...args) {
        const methodName = path.length > 0 ? path[path.length - 1] : '(root)';
        const methodPath = path;
-       // Log VM proxy calls directly
-       console.log('[VM] Proxy call:', serviceName + '.' + methodPath.join('.'), 'with args:', args.length);
+       // Log VM proxy calls directly - Remove for less noise
+       // console.log('[VM] Proxy call:', serviceName + '.' + methodPath.join('.'), 'with args:', args.length); // REMOVED
 
        // --- Optimizations - Keep these logs --- 
        if (serviceName === 'openai' && args.length > 0 && args[0] && typeof args[0] === 'object') {
             if (methodPath.includes('chat') && methodPath.includes('completions') && methodPath.includes('create')) {
                 if (!args[0].max_tokens || args[0].max_tokens > 150) {
                   args[0].max_tokens = 150;
-                  console.log('[VM Proxy] Limiting max_tokens to 150 for OpenAI chat completion');
+                  // console.log('[VM Proxy] Limiting max_tokens to 150 for OpenAI chat completion'); // REMOVED - Less noise
                 }
                 if (!args[0].model || args[0].model.includes('gpt-4')) {
                   args[0].model = 'gpt-3.5-turbo';
-                  console.log('[VM Proxy] Using gpt-3.5-turbo model for faster response');
+                  // console.log('[VM Proxy] Using gpt-3.5-turbo model for faster response'); // REMOVED - Less noise
                 }
                 if (args[0].temperature === undefined || args[0].temperature > 0.3) {
                   args[0].temperature = 0.3;
-                  console.log('[VM Proxy] Setting temperature to 0.3 for faster response');
+                  // console.log('[VM Proxy] Setting temperature to 0.3 for faster response'); // REMOVED - Less noise
                 }
                 if (args[0].messages && Array.isArray(args[0].messages)) {
                   let hasSystemMessage = false;
@@ -652,24 +685,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
        // ------------------------------------
 
        const requestId = __registerHostRequest__(serviceName, methodPath, args);
-       // Log request ID directly
-       console.log('[VM] Registered request:', requestId);
+       // Log request ID directly - Remove for less noise
+       // console.log('[VM] Registered request:', requestId); // REMOVED
 
           return new Promise((resolve, reject) => {
             let attempts = 0;
-            const maxAttempts = 15000; // ~30 seconds
+            const maxAttempts = 15000; // ~30 seconds -> Adjusted to 15000 attempts * ~20ms = ~300 seconds (5 min) - generous
             function checkResult() {
               attempts++;
               const result = __checkHostRequestStatus__(requestId);
               if (result.status === 'pending') {
-                const interval = attempts < 50 ? 0 : 2;
-                if (attempts < maxAttempts) {
-                  setTimeout(checkResult, interval);
-                } else {
-                  // Log timeout error directly
-                  console.error('[VM] Proxy request timed out:', serviceName + '.' + methodPath.join('.'));
-                  reject(new Error('Request timed out after ' + maxAttempts + ' polling attempts for ' + serviceName + '.' + methodPath.join('.')));
-                }
+                 // --- OPTIMIZATION: Increase polling interval ---
+                 const interval = attempts < 50 ? 10 : 20; // Increased from 4/8 to 10/20
+                 if (attempts < maxAttempts) {
+                   setTimeout(checkResult, interval);
+                 } else {
+                   // Log timeout error directly
+                   console.error('[VM] Proxy request timed out:', serviceName + '.' + methodPath.join('.'));
+                   reject(new Error('Request timed out after ' + maxAttempts + ' polling attempts for ' + serviceName + '.' + methodPath.join('.')));
+                 }
               } else if (result.status === 'fulfilled') {
                 resolve(result.value);
               } else {
@@ -697,7 +731,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 `;
 		const vmProxyGeneratorResult = ctx.evalCode(vmProxyGeneratorCode);
 		if (vmProxyGeneratorResult.error) {
-		  addLog("error", "host", "Failed to evaluate VM proxy generator code");
+		  console.log("error", "host", "Failed to evaluate VM proxy generator code");
 		  vmProxyGeneratorResult.error.dispose();
 		  throw new Error("Failed to setup VM proxies");
 		}
@@ -707,12 +741,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		for (const service of serviceProxies) {
 			const serviceName = service.name;
 			if (!serviceName) continue;
-			addLog("debug", "host", `Creating VM proxy for service: ${serviceName}`);
+			// console.log("debug", "host", `Creating VM proxy for service: ${serviceName}`);
 			const serviceNameHandle = ctx.newString(serviceName);
 			handles.push(serviceNameHandle);
 			const vmProxyResult = ctx.callFunction(vmProxyGeneratorHandle, ctx.undefined, serviceNameHandle);
 			if (vmProxyResult.error) {
-				addLog("error", "host", `Failed to create VM proxy for ${serviceName}`);
+				console.log("error", "host", `Failed to create VM proxy for ${serviceName}`, [ctx.dump(vmProxyResult.error)]);
 				vmProxyResult.error.dispose();
 				serviceNameHandle.dispose();
 				continue;
@@ -720,14 +754,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			const vmProxyHandle = vmProxyResult.value;
 			handles.push(vmProxyHandle);
 			ctx.setProp(toolsHandle, serviceName, vmProxyHandle);
-			addLog("debug", "host", `VM proxy created for ${serviceName}.`);
+			// console.log("debug", "host", `VM proxy created for ${serviceName}.`);
 		}
 		vmProxyGeneratorHandle.dispose();
-		addLog("debug", "host", "Finished populating VM 'tools' object.");
+		// console.log("debug", "host", "Finished populating VM 'tools' object.");
 
 
 		// Module Loader / Require Setup - Reduced verbosity
-		addLog("debug", "host", "Setting up module loader...");
+		// console.log("debug", "host", "Setting up module loader..."); // REMOVED
 		const requireGeneratorFuncStr = `
 			function() { // Define as a function to be called later
 				const moduleCache = {};
@@ -771,36 +805,37 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			}
 		`;
 
-		const modulesHandle = createHandleFromJson(ctx, modules, handles);
+		// --- OPTIMIZATION: Use NoTrack version for potentially faster module injection ---
+		const modulesHandle = createHandleFromJsonNoTrack(ctx, modules, handles);
 		ctx.setProp(ctx.global, "__injectedModules__", modulesHandle);
 
-		addLog("debug", "host", "Evaluating require generator...");
+		// console.log("debug", "host", "Evaluating require generator..."); // REMOVED
 		const requireGeneratorEvalResult = ctx.evalCode(`(${requireGeneratorFuncStr})`);
 		if (requireGeneratorEvalResult.error) {
 			handles.push(requireGeneratorEvalResult.error);
 			const errDump = ctx.dump(requireGeneratorEvalResult.error);
-			addLog("error", "host", "Failed to evaluate require generator function code", [errDump]);
+			console.log("error", "host", "Failed to evaluate require generator function code", [errDump]);
 			throw new Error("Failed to evaluate require generator");
 		}
 		const requireGeneratorHandle = requireGeneratorEvalResult.value;
 		handles.push(requireGeneratorHandle);
 
-		addLog("debug", "host", "Calling require generator...");
+		// console.log("debug", "host", "Calling require generator..."); // REMOVED
 		const requireCallResult = ctx.callFunction(requireGeneratorHandle, ctx.global);
 		if (requireCallResult.error) {
 			handles.push(requireCallResult.error as QuickJSHandle);
 			const errDump = ctx.dump(requireCallResult.error as QuickJSHandle);
-			addLog("error", "host", "Failed to call require generator function", [errDump]);
+			console.log("error", "host", "Failed to call require generator function", [errDump]);
 			throw new Error("Failed to call require generator function");
 		}
 		const requireHandle = requireCallResult.value as QuickJSHandle;
 		handles.push(requireHandle);
 
 		ctx.setProp(ctx.global, "require", requireHandle);
-		addLog("debug", "host", "Global injections complete.");
+		// console.log("debug", "host", "Global injections complete."); // REMOVED
 
 		// --- Execute Task Code ---
-		addLog("info", "host", "Executing user code...");
+		console.log("info", "host", "Executing user code...");
 		// Wrapped code remains the same - VM logs within it are now mostly console.log only
 		const wrappedCode = `
 (async () => {
@@ -811,8 +846,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       ${code}
     }
     if (typeof module.exports === 'function') {
-      // Log VM execution start directly
-      console.log('[VM] Task function found. Executing...');
+      // Log VM execution start directly - Remove for less noise
+      // console.log('[VM] Task function found. Executing...');
       // Pass input AND context object { tools, require, module } as second argument
       const resultPromiseOrValue = module.exports(
           globalThis.__input__ || {},
@@ -824,19 +859,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
           }
       );
       if (resultPromiseOrValue && typeof resultPromiseOrValue.then === 'function') {
-        console.log('[VM] Task returned a Promise. Awaiting...');
+        // console.log('[VM] Task returned a Promise. Awaiting...'); // REMOVED
         const finalResult = await resultPromiseOrValue;
-        console.log('[VM] Task Promise resolved. Assigning to __result__.');
+        // console.log('[VM] Task Promise resolved. Assigning to __result__.'); // REMOVED
         globalThis.__result__ = finalResult;
     } else {
-        console.log('[VM] Task returned non-Promise. Assigning to __result__.');
+        // console.log('[VM] Task returned non-Promise. Assigning to __result__.'); // REMOVED
         globalThis.__result__ = resultPromiseOrValue;
     }
     } else {
-      console.log('[VM] module.exports not a function. Assigning to __result__.');
+      // console.log('[VM] module.exports not a function. Assigning to __result__.'); // REMOVED
       globalThis.__result__ = module.exports;
     }
-    console.log('[VM] Wrapper execution finished.');
+    // console.log('[VM] Wrapper execution finished.'); // REMOVED
   } catch (err) {
     // Log VM error directly
     console.error('[VM] Task execution error:', err instanceof Error ? err.message : String(err), err instanceof Error ? err.stack : '');
@@ -847,19 +882,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
   }
 })();
 `;
-		addLog("debug", "host", "Evaluating user code ASYNCHRONOUSLY...");
+		//console.log("debug", "host", "Evaluating user code ASYNCHRONOUSLY...");
 
 		const evalPromise = ctx.evalCodeAsync(wrappedCode, "task.js");
 
 		// --- Wait for initial evaluation and process all subsequent jobs/timers ---
-		addLog("debug", "host", "Waiting for initial evaluation promise...");
+		// console.log("debug", "host", "Waiting for initial evaluation promise..."); // REMOVED
 		let evalResult = await evalPromise;
 
-		addLog("info", "host", "Initial promise settled. Processing remaining jobs/timers (timeout: ${executionTimeoutSeconds}s)...");
+		//console.log("info", "host", "Initial promise settled. Processing remaining jobs/timers (timeout: ${executionTimeoutSeconds}s)...");
 		const safetyBreakMax = executionTimeoutSeconds * 100; // Approx counter limit based on 10ms yields
 		let safetyBreak = safetyBreakMax;
 		let jobLoopErrorHandle: QuickJSHandle | null = null;
-		let lastTimerLogTime = Date.now();
 
 		try {
 			while (rt?.alive && safetyBreak > 0) {
@@ -869,82 +903,82 @@ Deno.serve(async (req: Request): Promise<Response> => {
 					 const jobsResult = rt.executePendingJobs();
 					 if (jobsResult.error) {
 						 const errorDump = ctx.dump(jobsResult.error);
-						 addLog("error", "host", "Error during executePendingJobs:", [errorDump]);
+						 console.log("error", "host", "Error during executePendingJobs:", [errorDump]);
 						 jobLoopErrorHandle = jobsResult.error;
 						 executionError = `QuickJS job execution error: ${simpleStringify(errorDump)}`;
 					break;
 				}
 					 jobsProcessed = jobsResult.value;
 					 // Remove per-job log
-					 // if (jobsProcessed > 0) { addLog("debug", "host", `Inner loop: Processed ${jobsProcessed} pending jobs.`); }
+					 // if (jobsProcessed > 0) { console.log("debug", "host", `Inner loop: Processed ${jobsProcessed} pending jobs.`); }
 				} while (jobsProcessed > 0 && rt?.alive);
 
 				if (executionError) { break; }
 
-				if (activeTimers.size > 0) {
+				if (activeTimers.size > 0 && rt?.alive) {
 					// Log timer status less frequently
-					if (Date.now() - lastTimerLogTime > 15000) { // Log every 15 seconds if timers are active
-						addLog("debug", "host", `QuickJS idle but ${activeTimers.size} timers active. Yielding to host...`);
-						lastTimerLogTime = Date.now();
-					}
+					// if (Date.now() - lastTimerLogTime > 15000) { // Log every 15 seconds if timers are active // REMOVED Debug log
+					// 	console.log("debug", "host", `QuickJS idle but ${activeTimers.size} timers active. Yielding to host...`); // REMOVED Debug log
+					// 	lastTimerLogTime = Date.now(); // REMOVED Debug log
+					// }
 					await new Promise(resolve => setTimeout(resolve, 10));
 					continue;
 				} else {
-					 addLog("debug", "host", "QuickJS idle and no active timers. Exiting job/timer loop.");
+					 // console.log("debug", "host", "QuickJS idle and no active timers. Exiting job/timer loop."); // REMOVED Debug log
 					 break;
 				}
 			} // End while loop
 
 			if (safetyBreak <= 0) {
-				addLog("warn", "host", "Safety break triggered during job/timer processing loop.");
+				console.log("warn", "host", "Safety break triggered during job/timer processing loop.");
 				executionError = `Task timed out after ${executionTimeoutSeconds}s (job/timer processing loop safety break).`;
 			}
 
 		} catch (loopError) {
-			addLog("error", "host", "Exception during job/timer processing loop:", [loopError]);
+			console.log("error", "host", "Exception during job/timer processing loop:", [loopError]);
 			executionError = `Host exception during job/timer processing: ${loopError instanceof Error ? loopError.message : String(loopError)}`;
 		}
-		addLog("info", "host", "Exited job/timer processing loop.");
+		console.log("info", "host", "Exited job/timer processing loop.");
 
 
 		// --- Process Final Result --- (Keep this logic, logging is important here)
-		addLog("debug", "host", "Processing final result...");
+		// console.log("debug", "host", "Processing final result..."); // REMOVED
 		if (executionError) {
-			 addLog("error", "host", `Task execution failed due to prior error: ${executionError}`);
+			 console.log("error", "host", `Task execution failed due to prior error: ${executionError}`);
 			 if (jobLoopErrorHandle) {
 				 finalResultHandle = jobLoopErrorHandle;
              } else { /* finalResultHandle remains null */ }
 		} else if (evalResult && 'error' in evalResult) {
-		    addLog("error", "host", "Task execution failed (initial evalPromise rejected).");
-		    // Handle potential undefined error handle
-		    const errorHandle = evalResult.error;
-		    if (errorHandle && errorHandle.alive) {
+		    // console.log("error", "host", "Task execution failed (initial evalPromise rejected)."); // Redundant if error is dumped below
+ 		    // Handle potential undefined error handle
+ 		    const errorHandle = evalResult.error;
+ 		    if (errorHandle && errorHandle.alive) {
 		        const errorDump = ctx.dump(errorHandle);
-		        addLog("error", "host", "Task execution failed (eval error)", [errorDump]);
+		        console.log("error", "host", "Task execution failed (initial eval error)", [errorDump]);
 			    executionError = simpleStringify(errorDump);
 			    finalResultHandle = errorHandle; // Assign only if valid
 		    } else {
-		        addLog("error", "host", "Task execution failed (eval error), but error handle was invalid/undefined.");
+		        console.log("error", "host", "Task execution failed (initial eval error), but error handle was invalid/undefined.");
 		        executionError = "Evaluation failed with invalid error handle";
 		        finalResultHandle = null; // Ensure it's null
 		    }
 		} else {
-            addLog("info", "host", "Attempting to retrieve globalThis.__result__ after job loop...");
+            //console.log("info", "host", "Attempting to retrieve globalThis.__result__ after job loop...");
             let resultHandleAfterLoop: QuickJSHandle | undefined;
             try {
                 resultHandleAfterLoop = ctx.getProp(ctx.global, "__result__");
                 if (resultHandleAfterLoop && resultHandleAfterLoop.alive && ctx.typeof(resultHandleAfterLoop) !== 'undefined') {
-                    addLog("info", "host", "__result__ handle obtained. Dumping...");
+                    // console.log("info", "host", "__result__ handle obtained. Dumping..."); // REMOVED - Less noise
                     try {
                         executionResult = ctx.dump(resultHandleAfterLoop);
 						// Log success concisely
-                        addLog("info", "host", "Successfully dumped __result__.");
+                        console.log("info", "host", "Successfully dumped __result__.");
 						// Keep preview in debug console only
 						//console.log('[HOST] [DEBUG] Result Preview:', JSON.stringify(executionResult).slice(0, 200) + '...');
                         finalResultHandle = resultHandleAfterLoop;
                     } catch (dumpError: any) {
                         const msg = dumpError?.message || dumpError;
-                        addLog("error", "host", "Failed to DUMP __result__ handle after loop:", [msg]);
+                        console.log("error", "host", "Failed to DUMP __result__ handle after loop:", [msg]);
                         executionError = `Failed to dump final result: ${msg}`;
                         finalResultHandle = resultHandleAfterLoop;
                     }
@@ -955,11 +989,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
                         vmErrorHandle = ctx.getProp(ctx.global, "__execution_error__");
                         if (vmErrorHandle && vmErrorHandle.alive && ctx.typeof(vmErrorHandle) === 'object') {
                              const vmError = ctx.dump(vmErrorHandle);
-                             addLog("error", "host", "Task execution failed inside VM", [vmError]);
+                             console.log("error", "host", "Task execution failed inside VM", [vmError]);
                              executionError = `VM Execution Error: ${vmError?.message || simpleStringify(vmError)}`;
                              finalResultHandle = vmErrorHandle;
                         } else {
-                            addLog("warn", "host", "__result__ handle not found/invalid and no __execution_error__ found.");
+                            // console.log("warn", "host", "__result__ handle not found/invalid and no __execution_error__ found."); // REMOVED Warning
                             if (vmErrorHandle) {
                                 if (vmErrorHandle.alive) {
                                     vmErrorHandle!.dispose();
@@ -967,24 +1001,24 @@ Deno.serve(async (req: Request): Promise<Response> => {
                             }
                             // Fallback check
                             if (evalResult && 'value' in evalResult && evalResult.value && evalResult.value.alive && ctx.typeof(evalResult.value) !== 'undefined') {
-                                addLog("warn", "host", "Falling back to initial evalPromise settlement value (unexpected). Dumping...");
+                                // console.log("warn", "host", "Falling back to initial evalPromise settlement value (unexpected). Dumping..."); // REMOVED Warning
                                 try {
                                     executionResult = ctx.dump(evalResult.value);
-                                    addLog("info", "host", "Successfully dumped initial evalPromise value.");
+                                    console.log("info", "host", "Successfully dumped initial evalPromise settlement value (used as fallback result).");
                                     finalResultHandle = evalResult.value;
                                 } catch (dumpError: any) { /* ... error handling ... */ }
                             } else {
-                               addLog("warn", "host", "No valid result or VM error found.");
-                               executionResult = {};
-                               if (resultHandleAfterLoop?.alive) resultHandleAfterLoop.dispose();
-                               if (evalResult?.value?.alive) evalResult.value.dispose();
-                               finalResultHandle = null;
+                               // console.log("warn", "host", "No valid result or VM error found."); // REMOVED Warning
+                                executionResult = {};
+                                if (resultHandleAfterLoop?.alive) resultHandleAfterLoop.dispose();
+                                if (evalResult?.value?.alive) evalResult.value.dispose();
+                                finalResultHandle = null;
                             }
                         }
                     } catch (getError: any) {
                         // Handle the error from getting __execution_error__
                         const msg = getError?.message || String(getError);
-                        addLog("error", "host", "Error getting __execution_error__:", [msg]);
+                        console.log("error", "host", "Error getting __execution_error__:", [msg]);
                         // Keep executionError as it might have been set earlier or default
                         // vmErrorHandle is already known to be problematic, so don't assign it
                     } finally {
@@ -997,14 +1031,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
                     // Ensure original result handle is disposed if needed and different from the final handle
                     if (resultHandleAfterLoop) {
                         if (resultHandleAfterLoop.alive && resultHandleAfterLoop! !== finalResultHandle) {
-                            addLog("debug", "host", "Disposing original resultHandleAfterLoop as it's not the final result handle.");
+                            // console.log("debug", "host", "Disposing original resultHandleAfterLoop as it's not the final result handle."); // REMOVED Debug
                             resultHandleAfterLoop!.dispose();
                         }
                     }
                 }
             } catch (getError: any) {
                 const msg = getError?.message || getError;
-                addLog("error", "host", "Failed to GET __result__ handle after loop:", [msg]);
+                console.log("error", "host", "Failed to GET __result__ handle after loop:", [msg]);
                 executionError = `Failed to get final result handle: ${msg}`;
                 // Check before disposing
                 if (resultHandleAfterLoop && resultHandleAfterLoop.alive) resultHandleAfterLoop.dispose();
@@ -1015,51 +1049,50 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 	} catch (setupError) {
 		 const errorMessage = setupError instanceof Error ? setupError.message : String(setupError);
-		 addLog("error", "host", `Unhandled exception during setup: ${errorMessage}`, setupError instanceof Error ? [setupError.stack] : []);
+		 console.log("error", "host", `Unhandled exception during setup: ${errorMessage}`, setupError instanceof Error ? [setupError.stack] : []);
 		executionError = errorMessage;
 		executionResult = null;
 	} finally {
 		 // Keep final disposal logs
 		 if (finalResultHandle && finalResultHandle.alive && !handles.includes(finalResultHandle)){
 			 try {
-				 addLog("debug", "host", "Disposing finalResultHandle in finally block.");
-				 finalResultHandle.dispose();
-			 } catch(e) { console.warn(`[HOST] [WARN] Error disposing finalResultHandle: ${e instanceof Error ? e.message : String(e)}`); }
+				 // console.log("debug", "host", "Disposing finalResultHandle in finally block."); // REMOVED Debug
+ 				 finalResultHandle.dispose();
+ 			 } catch(e) { console.warn(`[HOST] [WARN] Error disposing finalResultHandle: ${e instanceof Error ? e.message : String(e)}`); }
 		 }
-		 addLog("debug", "host", "Disposing QuickJS tracked handles...");
-		 while (handles.length > 0) {
-			 const h = handles.pop();
-			  try { if (h?.alive) h.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose handle err: ${e instanceof Error ? e.message : String(e)}`); }
+		 // console.log("debug", "host", "Disposing QuickJS tracked handles..."); // REMOVED Debug
+ 		 while (handles.length > 0) {
+ 			 const h = handles.pop();
+ 			  try { if (h?.alive) h.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose handle err: ${e instanceof Error ? e.message : String(e)}`); }
 		 }
-		 addLog("info", "host", "Disposing QuickJS context and runtime...");
-		 if (context?.alive) {
-			 try { context.dispose(); addLog("debug", "host", "QuickJS context disposed."); } catch (e) { console.warn(`[HOST] [WARN] Dispose ctx err: ${e instanceof Error ? e.message : String(e)}`); }
-		 } else {
-			 addLog("warn", "host", "Context already disposed before finally block.");
-		 }
-		 context = null;
-		 runtime = null;
-		 addLog("info", "host", `QuickJS resources cleanup finished. Total time: ${Date.now() - startTimestamp}ms`);
+ 		 //console.log("info", "host", "Disposing QuickJS context and runtime...");
+ 		 if (context?.alive) {
+ 			 try { context.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose ctx err: ${e instanceof Error ? e.message : String(e)}`); }
+ 		 } else {
+ 			 // console.log("warn", "host", "Context already disposed before finally block."); // REMOVED Warning
+ 		 }
+ 		 context = null;
+ 		 runtime = null;
+ 		 //console.log("info", "host", `QuickJS resources cleanup finished. Total time: ${Date.now() - startTimestamp}ms`);
 	}
 
 	// --- Return Response --- (Keep final logging)
 	if (executionError) {
-		addLog("error", "host", "Sending error response.", [executionError]);
-		return new Response( JSON.stringify({ success: false, error: executionError, logs }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
+		console.log("error", "host", "Sending error response.", [executionError]);
+		return new Response( JSON.stringify({ success: false, error: executionError }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
 	} else {
-		addLog("info", "host", "Sending success response.");
-		const finalPayload = { success: true, result: executionResult, logs };
+		console.log("info", "host", "Sending success response.");
+		const finalPayload = { success: true, result: executionResult };
 		try {
 			const payloadString = JSON.stringify(finalPayload);
 			// Log preview to console only
-			// console.log(`[HOST] [DEBUG] Final success payload (stringified, length=${payloadString.length}): ${payloadString.substring(0, 500)}${payloadString.length > 500 ? '...' : ''}`); // VERBOSE
+			// console.log(`[HOST] [DEBUG] Final success payload (stringified, length=${payloadString.length}): ${payloadString.substring(0, 500)}${payloadString.length > 500 ? '...' : ''}`); // REMOVED VERBOSE
 			// console.log("[HOST] [DEBUG] Value of executionResult being sent (type:", typeof executionResult, "):", executionResult); // POTENTIALLY LARGE
 		} catch (stringifyError) {
-			addLog("error", "host", "Failed to stringify final success payload!", [stringifyError]);
-			return new Response( JSON.stringify({ success: false, error: "Failed to stringify final result", logs }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
+			console.log("error", "host", "Failed to stringify final success payload!", [stringifyError]);
+			return new Response( JSON.stringify({ success: false, error: "Failed to stringify final result" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
 		}
 		return new Response( JSON.stringify(finalPayload), { headers: { ...corsHeaders, "Content-Type": "application/json" } } );
 	}
 });
 
-console.log("[Host] QuickJS function initialized and server started.");
