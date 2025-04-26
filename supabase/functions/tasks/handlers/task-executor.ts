@@ -165,7 +165,7 @@ export async function executeTask(
         clearTimeout(timeoutId); // Clear the timeout watcher
       }
 
-      console.log(formatLogMessage('DEBUG', `QuickJS response status: ${response.status}`));
+      //console.log(formatLogMessage('DEBUG', `QuickJS response status: ${response.status}`));
 
       const responseBody = await response.text(); // Read body once
 
@@ -217,9 +217,9 @@ export async function executeTask(
          throw new Error(errorMsg);
        }
 
-      console.log(formatLogMessage('INFO', `Task ${task.name} executed successfully.`));
+      //console.log(formatLogMessage('INFO', `Task ${task.name} executed successfully.`));
       const endTime = Date.now();
-      console.log(formatLogMessage('INFO', `Total execution time: ${endTime - startTime}ms`));
+      console.log('Total Time:', endTime - startTime);
 
       const finalFormattedResult = formatTaskResult(true, result.result, undefined);
       // Return the successful result, including merged logs and execution time
@@ -244,60 +244,3 @@ export async function executeTask(
       return jsonResponse(formatErrorResponse(errorMsg), 500);
   }
 }
-
-// Ensure response-formatter is updated to accept executionTime
-// Example modification in response-formatter.ts (adjust as needed):
-/*
-export interface TaskResponse {
-    success: boolean;
-    result?: any;
-    error?: { message: string; stack?: string };
-    logs?: string[];
-    metadata?: {
-        executionTime?: number;
-        [key: string]: any; // Allow other metadata
-    };
-}
-
-
-export function formatTaskResult(
-  success: boolean,
-  result?: any,
-  error?: any,
-  logs?: string[],
-  executionTime?: number // Add optional executionTime
-): TaskResponse {
-  const response: TaskResponse = { success };
-  if (result !== undefined) response.result = result;
-  if (error) response.error = { message: error.message || String(error), stack: error.stack };
-  if (logs) response.logs = logs;
-  if (executionTime !== undefined) {
-    response.metadata = { // Ensure metadata exists
-        ...(response.metadata || {}), // Preserve existing metadata if any
-        executionTime
-    };
-    // Add basic resource usage if needed, requires more instrumentation
-    // response.metadata.resourceUsage = { memory: 0, cpu: 0 };
-  }
-  return response;
-}
-
-export function formatErrorResponse(
-    message: string,
-    logs?: string[],
-    executionTime?: number // Add optional executionTime
-): TaskResponse {
-    const response: TaskResponse = {
-        success: false,
-        error: { message }
-    };
-    if (logs) response.logs = logs;
-    if (executionTime !== undefined) {
-      response.metadata = { // Ensure metadata exists
-          ...(response.metadata || {}),
-          executionTime
-      };
-    }
-    return response;
-}
-*/

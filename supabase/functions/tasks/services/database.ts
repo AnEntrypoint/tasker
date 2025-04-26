@@ -97,7 +97,7 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
     }
     
     if (response) {
-      console.log(`[INFO] Task found: ${response.name} (id: ${response.id})`);
+      //console.log(`[INFO] Task found: ${response.name} (id: ${response.id})`);
       return response;
     }
     

@@ -111,7 +111,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
 	// Define startTimestamp here so it's accessible in finally block
 	try {
-		console.log("info", "host", "Processing request...");
+		//console.log("info", "host", "Processing request...");
 		const { code, input = {}, modules = {}, serviceProxies = [], runtimeConfig = {} } = await req.json();
 		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 360; // Default 36 seconds (doubled)
 		// Removed verbose debug log of request body details
@@ -795,7 +795,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		// console.log("debug", "host", "Global injections complete."); // REMOVED
 
 		// --- Execute Task Code ---
-		console.log("info", "host", "Executing user code...");
+		//console.log("info", "host", "Executing user code...");
 		// Wrapped code remains the same - VM logs within it are now mostly console.log only
 		const wrappedCode = `
 (async () => {
@@ -898,7 +898,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 			console.log("error", "host", "Exception during job/timer processing loop:", [loopError]);
 			executionError = `Host exception during job/timer processing: ${loopError instanceof Error ? loopError.message : String(loopError)}`;
 		}
-		console.log("info", "host", "Exited job/timer processing loop.");
+		//console.log("info", "host", "Exited job/timer processing loop.");
 
 
 		// --- Process Final Result --- (Keep this logic, logging is important here)
@@ -1041,7 +1041,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 		console.log("error", "host", "Sending error response.", [executionError]);
 		return new Response( JSON.stringify({ success: false, error: executionError }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
 	} else {
-		console.log("info", "host", "Sending success response.");
+		//console.log("info", "host", "Sending success response.");
 		const finalPayload = { success: true, result: executionResult };
 		try {
 			const payloadString = JSON.stringify(finalPayload);
