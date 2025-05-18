@@ -3,34 +3,49 @@ import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
 config({ export: true });
 
-// Helper to determine the correct functions server URL (local vs deployed)
-function getFunctionsServerUrl(): string {
-  // Use SUPABASE_URL which points to the functions server (e.g., http://127.0.0.1:8000) locally
-  const functionsUrl = Deno.env.get('SUPABASE_URL') || Deno.env.get('EXT_SUPABASE_URL');
+// Helper to determine the correct wrappedsupabase proxy URL
+function getWrappedSupabaseProxyUrl(): string {
+  const extSupabaseUrl = Deno.env.get('EXT_SUPABASE_URL');
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  
+  // Always use localhost:54321 for local development REST API
+  const defaultUrl = "http://localhost:54321";
+  const edgeFunctionsUrl = "http://127.0.0.1:8000";
 
-  if (!functionsUrl) {
-    console.error("[database.ts] Could not determine Functions Server URL from SUPABASE_URL or EXT_SUPABASE_URL");
-    // Throw an error as this is critical
-    throw new Error("Functions Server URL not configured in environment.");
+  if (extSupabaseUrl) {
+    // If using local development URL for edge functions, use REST API URL instead
+    if (extSupabaseUrl.includes('127.0.0.1:8000')) {
+      console.log("[database.ts] Found edge functions URL in EXT_SUPABASE_URL, using REST API URL instead:", defaultUrl);
+      return `${defaultUrl}/functions/v1/wrappedsupabase`;
+    }
+    console.log("[database.ts] Using EXT_SUPABASE_URL for wrappedsupabase:", extSupabaseUrl);
+    return `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
+  } else if (supabaseUrl) {
+    // If using local development URL for edge functions, use REST API URL instead
+    if (supabaseUrl.includes('127.0.0.1:8000')) {
+      console.log("[database.ts] Found edge functions URL in SUPABASE_URL, using REST API URL instead:", defaultUrl);
+      return `${defaultUrl}/functions/v1/wrappedsupabase`;
+    }
+    console.log("[database.ts] Using SUPABASE_URL for wrappedsupabase:", supabaseUrl);
+    return `${supabaseUrl}/functions/v1/wrappedsupabase`;
+  } else {
+    console.log("[database.ts] Neither EXT_SUPABASE_URL nor SUPABASE_URL found in environment. Using default:", defaultUrl);
+    return `${defaultUrl}/functions/v1/wrappedsupabase`;
   }
-
-  // Assume the URL provided by env var is correct whether local or deployed
-  // The key is whether the /tasks function can reach /wrappedsupabase via this URL
-  const baseUrl = `${functionsUrl}/functions/v1`;
-  console.log(`[database.ts] Using Functions Server URL: ${baseUrl}`);
-  return baseUrl;
 }
 
-// Constants for database connection
-// const SUPABASE_URL = Deno.env.get('EXT_SUPABASE_URL', ''); // Don't use this directly for proxy target
-const FUNCTIONS_URL = getFunctionsServerUrl(); // Use the helper
-const KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY');
+const WRAPPED_SUPABASE_PROXY_URL = getWrappedSupabaseProxyUrl();
+const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                          Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || 
+                          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
 
-// Validate essential configuration
-if (!KEY) {
-  console.error("[database.ts] EXT_SUPABASE_SERVICE_ROLE_KEY not found in environment.");
+if (!SERVICE_ROLE_KEY) {
+  console.error("[database.ts] EXT_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY not found in environment.");
   throw new Error("Supabase Service Role Key not configured.");
 }
+
+console.log("[database.ts] Final wrappedsupabase proxy baseUrl:", WRAPPED_SUPABASE_PROXY_URL);
+console.log("[database.ts] Using service role key:", SERVICE_ROLE_KEY ? '[REDACTED]' : 'undefined');
 
 /**
  * Interface for tracked deleted items in global scope
@@ -46,9 +61,9 @@ if (!globalThis.__deletedItems) {
 
 // Create service proxy
 const supabase = createServiceProxy('supabase', {
-  baseUrl: `${FUNCTIONS_URL}/wrappedsupabase`, // Target wrappedsupabase via determined URL
+  baseUrl: WRAPPED_SUPABASE_PROXY_URL,
   headers: {
-    'Authorization': `Bearer ${KEY}`
+    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
   }
 });
 
@@ -70,38 +85,78 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
     return null;
   }
 
-  //console.log(`[INFO] Fetching task: ${taskId || taskName}`);
-  //console.log(`[DEBUG] Using SUPABASE_URL: ${FUNCTIONS_URL}`);
-  //console.log(`[DEBUG] Using KEY: ${KEY!.substring(0, 10)}...`);
+  console.log(`[INFO] Fetching task: ${taskId || taskName}`);
 
   try {
+    // Try using the SDK wrapper first
     let query = supabase.from('task_functions').select('*');
     
     if (taskId && !isNaN(Number(taskId))) {
-      //console.log(`[DEBUG] Querying by ID: ${taskId}`);
       query = query.eq('id', Number(taskId));
     } else {
       const searchTerm = taskName || taskId || '';
-      //console.log(`[DEBUG] Querying by name: ${searchTerm}`);
       query = query.eq('name', searchTerm);
     }
     
-    //console.log(`[DEBUG] Executing query...`);
-    const response = await query.limit(1).single();
-    
-    //console.log(`[DEBUG] Response received:`, JSON.stringify(response, null, 2));
-    
-    if (response.error) {
-      console.error(`[ERROR] Task lookup failed: ${response.error.message}`);
-      return null;
+    try {
+      const response = await query.limit(1).single();
+      
+      if (response.error) {
+        console.error(`[ERROR] Task lookup failed: ${response.error.message}`);
+      } else if (response) {
+        console.log(`[INFO] Task found: ${response.name} (id: ${response.id})`);
+        return response;
+      }
+    } catch (sdkError) {
+      console.error(`[ERROR] SDK task fetch error: ${sdkError instanceof Error ? sdkError.message : String(sdkError)}`);
+      // Fall through to direct fetch if SDK fails
     }
     
-    if (response) {
-      //console.log(`[INFO] Task found: ${response.name} (id: ${response.id})`);
-      return response;
+    // If SDK wrapper fails, try direct fetch
+    console.log(`[INFO] Falling back to direct fetch for task: ${taskId || taskName}`);
+    
+    const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+    const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                           Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    
+    if (!serviceRoleKey) {
+      throw new Error("Service role key not available for direct fetch");
     }
     
-    console.log(`[INFO] No task found`);
+    let url = `${baseUrl}/rest/v1/task_functions?`;
+    
+    if (taskId && !isNaN(Number(taskId))) {
+      url += `select=*&id=eq.${encodeURIComponent(taskId)}`;
+    } else {
+      const searchTerm = taskName || taskId || '';
+      url += `select=*&name=eq.${encodeURIComponent(searchTerm)}`;
+    }
+    
+    url += '&limit=1';
+    
+    console.log(`[DEBUG] Direct fetch URL: ${url}`);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (Array.isArray(data) && data.length > 0) {
+      console.log(`[INFO] Task found via direct fetch: ${data[0].name} (id: ${data[0].id})`);
+      return data[0];
+    }
+    
+    console.log(`[INFO] No task found via direct fetch`);
     return null;
   } catch (error) {
     console.error(`[ERROR] Database fetch error: ${error instanceof Error ? error.message : String(error)}`);
@@ -141,7 +196,7 @@ export async function saveTaskResult(taskId: string, result: any): Promise<boole
  * Handle Supabase access for external tasks
  */
 export async function handleSupabaseAccess(input: any): Promise<any> {
-  if (!FUNCTIONS_URL /* || !KEY removed check */) {
+  if (!WRAPPED_SUPABASE_PROXY_URL /* || !SERVICE_ROLE_KEY removed check */) {
     throw new Error("Missing Supabase configuration (URL)");
   }
   
@@ -152,7 +207,7 @@ export async function handleSupabaseAccess(input: any): Promise<any> {
   }
   
   return {
-    url: FUNCTIONS_URL,
+    url: WRAPPED_SUPABASE_PROXY_URL,
     table: input.table,
   };
 }

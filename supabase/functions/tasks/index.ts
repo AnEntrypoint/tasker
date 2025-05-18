@@ -5,11 +5,13 @@ import { corsHeaders } from "../quickjs/cors.ts";
 import { executeTask } from "./handlers/task-executor.ts";
 import { jsonResponse, formatTaskResult, formatLogMessage } from "./utils/response-formatter.ts";
 import { TaskRegistry } from "./registry/task-registry.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { generateSchema, formatSchema } from './services/schema-generator.ts';
 import { parseJSDocComments } from './utils/jsdoc-parser.ts';
 import { GeneratedSchema } from "./types/index.ts";
 import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
+import { hostLog, simpleStringify } from '../_shared/utils.ts'; // Assuming utils are in _shared
+import { fetchTaskFromDatabase } from "./services/database.ts";
 
 config({ export: true });
 
@@ -22,11 +24,22 @@ const basicTaskRegistry = new TaskRegistry();
 const specialTaskRegistry = new TaskRegistry();
 
 // Environment setup
-const SUPABASE_URL = Deno.env.get('EXT_SUPABASE_URL') || '';
-const SUPABASE_ANON_KEY = Deno.env.get('EXT_SUPABASE_ANON_KEY') || '';
-const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || '';
+const extSupabaseUrl = Deno.env.get('EXT_SUPABASE_URL') || '';
+const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
+
+// If the URL is the edge functions URL, use the REST API URL instead for local dev
+const SUPABASE_URL = extSupabaseUrl.includes('127.0.0.1:8000') 
+    ? 'http://localhost:54321' 
+    : extSupabaseUrl || (supabaseUrl.includes('127.0.0.1:8000') ? 'http://localhost:54321' : supabaseUrl);
+
+const SUPABASE_ANON_KEY = Deno.env.get('EXT_SUPABASE_ANON_KEY') || Deno.env.get('SUPABASE_ANON_KEY') || '';
+const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 console.log(`[INFO] SUPABASE_URL: ${SUPABASE_URL}`);
-const supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+console.log(`[INFO] SERVICE_ROLE_KEY (masked): ${SERVICE_ROLE_KEY ? '*'.repeat(10) : 'MISSING'}`);
+console.log(`[INFO] Environment variables:`, Deno.env.toObject());
+const supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+    auth: { persistSession: false }
+});
 
 // --- Define the Tasks Service for SDK Wrapper ---
 const tasksService = {
@@ -79,136 +92,373 @@ function createCorsPreflightResponse(): Response {
   return new Response(null, { status: 204, headers: corsHeaders });
 }
 
-serve(async (req: Request, connInfo: ConnInfo): Promise<Response> => {
-  if (req.method === 'OPTIONS') {
-    return createCorsPreflightResponse();
-  }
+const CORS_HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
 
-  const url = new URL(req.url);
-  // Use the full pathname provided by the Supabase gateway
-  const pathname = url.pathname;
-  console.log(`[INFO] Processing ${req.method} request to ${pathname}`);
+const LOG_PREFIX_BASE = "[TasksHandlerEF]"; // Tasks Handler Edge Function
 
-  try {
-    // --- Handle POST requests (Potential SDK Call or Direct Task Execution) ---
-    if (req.method === 'POST') {
-        let requestBody;
-        try {
-          requestBody = await req.clone().json();
-        } catch (e) {
-          const error = e as Error;
-          return createErrorResponse("Invalid JSON body", [formatLogMessage('ERROR', `Failed to parse JSON body: ${error.message}`)], 400);
-        }
-
-        // Check for SDK Wrapper request (has 'chain')
-        if (requestBody.chain && Array.isArray(requestBody.chain)) {
-          //console.log(`[INFO] Handling SDK wrapper request for tasks service`);
-          try {
-            const result = await executeMethodChain(tasksService, requestBody.chain);
-            return new Response(JSON.stringify({ data: result }), { status: 200, headers: corsHeaders });
-          } catch (error) {
-            const err = error instanceof Error ? error : new Error(String(error));
-            console.error(`[ERROR][SDK Service] ${err.message}`);
-            return new Response(JSON.stringify({ 
-              error: { message: err.message, code: (err as any).code, name: err.name, stack: err.stack }
-            }), { status: (err as any).status || 500, headers: corsHeaders });
-          }
-        } 
-        // Handle Direct Task Execution request (POST without 'chain')
-        else {
-            console.log(`[INFO] Handling direct task execution request`);
-            const taskIdentifier = requestBody.taskId || requestBody.id || requestBody.name;
-            if (!taskIdentifier) {
-              return createErrorResponse('No task identifier provided in body', [], 400);
-            }
-            // Check registry or execute from DB (using the logic previously in handleTaskRoutes)
-            if (specialTaskRegistry.hasTask(taskIdentifier) || basicTaskRegistry.hasTask(taskIdentifier)) {
-                const logs: string[] = [formatLogMessage('INFO', `Executing registered task: ${taskIdentifier}`)];
-                try {
-                  let result;
-                  if (specialTaskRegistry.hasTask(taskIdentifier)) {
-                    result = await specialTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
-                  } else {
-                    result = await basicTaskRegistry.executeTask(taskIdentifier, requestBody.input || {}, logs);
-                  }
-                  return createResponse(result, logs);
-                } catch (error) {
-                  const errorMsg = `Error executing registered task: ${error instanceof Error ? error.message : String(error)}`;
-                  console.error(`[ERROR] ${errorMsg}`);
-                  logs.push(formatLogMessage('ERROR', errorMsg));
-                  return createErrorResponse(errorMsg, logs);
-                }
-            } else {
-                const options = {
-                  debug: Boolean(requestBody.debug),
-                  verbose: Boolean(requestBody.verbose),
-                  include_logs: Boolean(requestBody.include_logs)
-                };
-                // executeTask now returns Response, so just return it
-                return await executeTask(taskIdentifier, requestBody.input || {}, options);
-            }
-        }
+async function tasksHandler(req: Request): Promise<Response> {
+    // Handle CORS preflight requests
+    if (req.method === "OPTIONS") {
+        return new Response("ok", { headers: CORS_HEADERS });
     }
-    // --- Handle GET requests (List, OpenAPI, etc.) ---
-    else if (req.method === 'GET') {
-        // Determine route based on the last segment of the path relative to the function mount point
-        const pathSegments = pathname.split('/').filter(Boolean);
-        const routeSegment = pathSegments.length > 0 ? pathSegments[pathSegments.length - 1] : '';
 
-        // Task list route (/functions/v1/tasks/list or potentially just /functions/v1/tasks)
-        if (routeSegment === 'list' || (routeSegment === 'tasks' && pathSegments.includes('v1'))) { // Basic check
-             console.log(`[INFO] Handling GET request for task list`);
+    let supabaseClient: SupabaseClient;
+    try {
+        if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+            hostLog(LOG_PREFIX_BASE, 'error', "Supabase URL or Service Role Key is not configured in environment variables.");
+            throw new Error("Supabase environment variables for service role not set.");
+        }
+        // Initialize Supabase client with service role key for administrative tasks
+        supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+            // No need to pass auth headers explicitly when using service_role_key server-side
+            auth: { persistSession: false }
+        });
+    } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        hostLog(LOG_PREFIX_BASE, 'error', "Supabase client (service role) initialization failed:", error.message);
+        return new Response(simpleStringify({ error: "Server configuration error.", details: error.message }), {
+            status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
+
+    let requestBody;
+    try {
+        requestBody = await req.json();
+    } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        hostLog(LOG_PREFIX_BASE, 'error', "Invalid JSON request body:", error.message);
+        return new Response(simpleStringify({ error: "Invalid JSON request body.", details: error.message }), {
+            status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
+
+    const { taskName, input } = requestBody;
+    const logPrefix = `${LOG_PREFIX_BASE} [TaskName: ${taskName || 'N/A'}]`;
+
+    if (!taskName || typeof taskName !== 'string') {
+        hostLog(logPrefix, 'error', "'taskName' is required in the request body and must be a string.");
+        return new Response(simpleStringify({ error: "'taskName' is required and must be a string." }), {
+            status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
+
+    try {
+        // Step 1: Fetch Task Definition from task_functions table
+        hostLog(logPrefix, 'info', `Attempting to fetch definition for task: '${taskName}'`);
+        
+        // Use fetchTaskFromDatabase which now has direct HTTP fetch as a fallback
+        const taskFunction = await fetchTaskFromDatabase(undefined, taskName);
+
+        if (!taskFunction) {
+            hostLog(logPrefix, 'warn', `Task definition not found for '${taskName}'.`);
+            return new Response(simpleStringify({ error: `Task '${taskName}' not found.` }), {
+                status: 404, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+            });
+        }
+        hostLog(logPrefix, 'info', `Task definition '${taskFunction.name}' (ID: ${taskFunction.id}) found.`);
+
+        // Step 2: Create a task_runs record to track the overall user request
+        hostLog(logPrefix, 'info', `Creating task_run record with input:`, input || '(no input)');
+        
+        // Use direct fetch method for creating task_run record
+        const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+        const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+                         
+        if (!serviceRoleKey) {
+            throw new Error("Service role key not available for direct insert");
+        }
+        
+        const taskRunData = {
+            task_function_id: taskFunction.id,
+            task_name: taskFunction.name,
+            input: input || null,
+            status: 'queued'
+        };
+        
+        const url = `${baseUrl}/rest/v1/task_runs`;
+        
+        const insertResponse = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(taskRunData)
+        });
+        
+        if (!insertResponse.ok) {
+            const errorText = await insertResponse.text();
+            hostLog(logPrefix, 'error', `Failed to create task_run record in database: HTTP ${insertResponse.status} ${insertResponse.statusText}`, errorText);
+            throw new Error(`Database error: Failed to initiate task run. HTTP ${insertResponse.status} ${insertResponse.statusText}`);
+        }
+        
+        const taskRunResult = await insertResponse.json();
+        const taskRunId = Array.isArray(taskRunResult) && taskRunResult.length > 0 ? taskRunResult[0].id : null;
+        
+        if (!taskRunId) {
+            hostLog(logPrefix, 'error', "Failed to obtain task_run ID after insertion");
+            throw new Error("Database error: Failed to obtain task run ID after insertion");
+        }
+        
+        hostLog(logPrefix, 'info', `Task_run record created successfully: ${taskRunId}`);
+
+        // Step 3: Create the initial stack_runs record to kick off the execution
+        hostLog(logPrefix, 'info', `Creating initial stack_run for task_run ${taskRunId}`);
+        
+        // Use direct fetch for creating stack_run record
+        const stackRunData = {
+            parent_task_run_id: taskRunId,
+            service_name: 'tasks',
+            method_name: 'execute',
+            args: [taskFunction.name, input || null],
+            status: 'pending',
+            vm_state: {
+                task_code: taskFunction.code,
+                task_name: taskFunction.name,
+                input: input || null
+            }
+        };
+        
+        const stackRunsUrl = `${baseUrl}/rest/v1/stack_runs`;
+        
+        const stackRunResponse = await fetch(stackRunsUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(stackRunData)
+        });
+        
+        if (!stackRunResponse.ok) {
+            const errorText = await stackRunResponse.text();
+            hostLog(logPrefix, 'error', `Failed to create initial stack_run record in database: HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`, errorText);
+            
+            // Attempt to mark the parent task_run as failed to avoid orphaned task_runs
             try {
-                const endpoint = `${SUPABASE_URL}/rest/v1/task_functions`;
-                const response = await fetch(`${endpoint}?order=name.asc`, {
-                    method: 'GET',
-                    headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` }
+                const updateTaskRunUrl = `${baseUrl}/rest/v1/task_runs?id=eq.${encodeURIComponent(taskRunId)}`;
+                await fetch(updateTaskRunUrl, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    },
+                    body: JSON.stringify({
+                        status: 'failed',
+                        error: { 
+                            message: "System error: Failed to create initial stack_run for task execution.", 
+                            details: `HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`
+                        },
+                        ended_at: new Date().toISOString()
+                    })
                 });
-                if (!response.ok) return createErrorResponse(`REST API error: ${response.status} ${response.statusText}`);
-                const data = await response.json();
-                return createResponse({ tasks: data || [], count: data?.length || 0, timestamp: new Date().toISOString() });
-            } catch (error) {
-                return createErrorResponse(`Error listing tasks: ${error instanceof Error ? error.message : String(error)}`);
+            } catch (updateErr) {
+                hostLog(logPrefix, 'error', "Additionally failed to mark task_run as failed:", updateErr);
             }
+            
+            throw new Error(`Database error: Failed to create initial stack run. HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`);
         }
-        // OpenAPI schema route (/functions/v1/tasks/openapi)
-        else if (routeSegment === 'openapi') {
-            console.log(`[INFO] Handling GET request for OpenAPI schema`);
-            try {
-                // Simplified OpenAPI generation logic from previous code
-                const { data: tasks, error: fetchError } = await supabaseClient.from('task_functions').select('name, code, description');
-                if (fetchError) throw new Error(`Database error fetching tasks: ${fetchError.message}`);
-                if (!tasks || tasks.length === 0) return createResponse({ openapi: '3.0.0', info: { title: 'Task API', version: '1.0.0' }, paths: {} });
-                const schemas: Record<string, GeneratedSchema> = {};
-                 for (const task of tasks) {
-                    try {
-                        const parsedInfo = parseJSDocComments(task.code || '', task.name || 'unknown');
-                        schemas[task.name] = generateSchema(parsedInfo);
-                    } catch (parseError) {
-                        const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
-                        console.error(`[ERROR] Failed to parse/generate schema for task ${task.name}: ${errorMsg}`);
-                        schemas[task.name] = { name: task.name, description: `(Error generating schema: ${errorMsg})`, parameters: { type: 'object' }, returns: { type: 'object' } };
-                    }
-                }
-                const aggregatedSchemas = { info: { title: 'Task API Schemas (Aggregated)', version: '1.0.0' }, tasks: schemas };
-                return createResponse(aggregatedSchemas);
-            } catch (error) {
-                 return createErrorResponse(`Error generating OpenAPI schema: ${error instanceof Error ? error.message : String(error)}`);
-            }
+        
+        const stackRunResult = await stackRunResponse.json();
+        const stackRunId = Array.isArray(stackRunResult) && stackRunResult.length > 0 ? stackRunResult[0].id : null;
+        
+        if (!stackRunId) {
+            hostLog(logPrefix, 'error', "Failed to obtain stack_run ID after insertion");
+            throw new Error("Database error: Failed to obtain stack run ID after insertion");
         }
-        // Add other GET routes if needed (e.g., /health)
-        else {
-             return createErrorResponse('GET route not found', [formatLogMessage('ERROR', `GET Route not found: ${pathname}`)], 404);
-        }
-    }
-    // --- Handle other methods (PUT, DELETE, etc. - currently not standard task actions) ---
-    else {
-         return createErrorResponse(`Unsupported method: ${req.method}`, [], 405);
-    }
+        
+        hostLog(logPrefix, 'info', `Initial stack_run ${stackRunId} created. Task '${taskName}' (run ID: ${taskRunId}) has been successfully offloaded.`);
 
-  } catch (error) {
-    // Catch-all for unexpected errors in the main handler
-    console.error(`[ERROR] Unhandled error in main handler: ${error instanceof Error ? error.message : String(error)}`);
-    return createErrorResponse(`Internal server error: ${error instanceof Error ? error.message : String(error)}`);
-  }
+        // Step 4: Immediately trigger stack processor to avoid relying on database triggers
+        try {
+            hostLog(logPrefix, 'info', `Directly triggering stack processor for task run ${taskRunId}`);
+            const stackProcessorUrl = `${baseUrl}/functions/v1/stack-processor/direct-process`;
+            
+            const processorResponse = await fetch(stackProcessorUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${serviceRoleKey}`
+                },
+                body: JSON.stringify({
+                    taskName: taskFunction.name,
+                    input: input || null,
+                    taskRunId: taskRunId
+                })
+            });
+            
+            if (!processorResponse.ok) {
+                const errorText = await processorResponse.text();
+                hostLog(logPrefix, 'warn', `Failed to trigger stack processor (will continue asynchronously): HTTP ${processorResponse.status}`, errorText);
+                // Continue even if direct processing fails (it will be picked up by cron)
+            } else {
+                hostLog(logPrefix, 'info', `Stack processor triggered successfully for task run ${taskRunId}`);
+            }
+        } catch (e) {
+            const error = e instanceof Error ? e : new Error(String(e));
+            hostLog(logPrefix, 'warn', `Error triggering stack processor (will continue asynchronously):`, error.message);
+            // Continue even if direct processing fails (it will be picked up by cron)
+        }
+
+        // Step 5: Respond to the user indicating the task has been accepted
+        return new Response(simpleStringify({
+            message: "Task accepted and queued for asynchronous processing.",
+            taskRunId: taskRunId
+        }), {
+            status: 202, // HTTP 202 Accepted: Request accepted, processing not complete
+            headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+
+    } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        hostLog(logPrefix, 'error', "Unhandled error in /tasks endpoint handler:", error.message, error.stack);
+        // Avoid exposing detailed internal errors to the client unless necessary
+        return new Response(simpleStringify({ error: "An unexpected server error occurred while processing the task request." }), {
+            status: 500,
+            headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
+}
+
+// New handler for getting task status
+async function statusHandler(req: Request): Promise<Response> {
+    // Extract taskRunId from query params in URL for GET requests
+    const url = new URL(req.url);
+    const taskRunId = url.searchParams.get('id');
+    
+    const logPrefix = `[tasks/status/${taskRunId}]`;
+    
+    hostLog(logPrefix, 'info', `Received status request for task run ID: ${taskRunId}`);
+    
+    if (!taskRunId) {
+        return new Response(
+            simpleStringify({ error: 'Missing taskRunId parameter' }),
+            { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    }
+    
+    try {
+        // Determine the correct baseUrl for database access
+        const extSupabaseUrl = Deno.env.get("EXT_SUPABASE_URL") || "";
+        const supabaseUrl = Deno.env.get("SUPABASE_URL") || "http://kong:8000";
+        
+        // Use Kong URL for local development or when EXT_SUPABASE_URL is missing
+        const useKong = extSupabaseUrl.includes('localhost') || 
+                       extSupabaseUrl.includes('127.0.0.1') || 
+                       !extSupabaseUrl;
+                       
+        const baseUrl = useKong 
+            ? 'http://kong:8000/rest/v1/task_runs' 
+            : `${SUPABASE_URL}/rest/v1/task_runs`;
+        
+        // Fetch task run from database
+        const dbUrl = `${baseUrl}?id=eq.${taskRunId}&select=*`;
+        hostLog(logPrefix, 'info', `Attempting to fetch task run from: ${dbUrl}`);
+        
+        const response = await fetch(dbUrl, {
+            headers: {
+                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                'apikey': SERVICE_ROLE_KEY
+            }
+        });
+        
+        if (!response.ok) {
+            const error = await response.text();
+            const errorMessage = `Database query failed: ${error}`;
+            hostLog(logPrefix, 'error', errorMessage);
+            return new Response(
+                simpleStringify({ error: `Failed to fetch task status: ${errorMessage}` }),
+                { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const tasks = await response.json();
+        hostLog(logPrefix, 'info', `Database query successful. Found ${tasks.length} records.`);
+        
+        if (tasks.length === 0) {
+            return new Response(
+                simpleStringify({ error: `Task run with ID ${taskRunId} not found` }),
+                { status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const taskRun = tasks[0];
+        hostLog(logPrefix, 'info', `Returning task run with status: ${taskRun.status}`);
+        
+        // Extra handling for error states to make debugging easier
+        if (taskRun.status === 'error') {
+            hostLog(logPrefix, 'warn', `Task in error state. Error details: ${JSON.stringify(taskRun.error || 'No error details available')}`);
+        }
+        
+        return new Response(
+            simpleStringify(taskRun),
+            { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        hostLog(logPrefix, 'error', `Exception in statusHandler: ${errorMessage}`);
+        return new Response(
+            simpleStringify({ error: `Internal server error: ${errorMessage}` }),
+            { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    }
+}
+
+// Start the Deno server and pass the tasksHandler for incoming requests
+serve(async (req: Request) => {
+    const url = new URL(req.url);
+    const path = url.pathname.split("/").filter(Boolean); // Remove empty segments
+    
+    // Log request
+    hostLog(LOG_PREFIX_BASE, 'info', `Received request: ${req.method} ${url.pathname}`);
+    
+    try {
+        // Routes handler
+        if (path.length >= 2 && path[0] === "tasks") {
+            if (path[1] === "execute") {
+                // Execute a task: POST /tasks/execute
+                return tasksHandler(req);
+            } else if (path[1] === "status") {
+                // Get task status: GET /tasks/status?id=xyz
+                return statusHandler(req);
+            } else {
+                // Default route for backward compatibility
+                return tasksHandler(req);
+            }
+        }
+        
+        // Handle root request or unknown paths
+        return new Response(simpleStringify({
+            service: "Tasker Edge Function",
+            version: "1.0.0",
+            status: "running",
+            endpoints: [
+                "/tasks/execute [POST] - Execute a task",
+                "/tasks/status [GET] - Get task status"
+            ]
+        }), {
+            status: 200,
+            headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        hostLog(LOG_PREFIX_BASE, 'error', "Unhandled error in request handler:", error.message);
+        return new Response(simpleStringify({ 
+            error: "Internal server error", 
+            message: error.message 
+        }), {
+            status: 500,
+            headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
 });

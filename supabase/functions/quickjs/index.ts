@@ -1,6 +1,5 @@
 // console.log("[Host Pre-Init] Loading quickjs/index.ts...");
 
-import { corsHeaders } from "./cors.ts";
 import {
 	getQuickJS,
 	newAsyncContext,
@@ -8,30 +7,36 @@ import {
 	QuickJSHandle,
 	QuickJSRuntime,
 	QuickJSAsyncContext,
+	RELEASE_ASYNC,
+	QuickJSWASMModule
 } from "quickjs-emscripten";
 import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
+// Import shared utils
+import {
+	hostLog,
+	simpleStringify,
+	LogEntry,
+	fetchTaskFromDatabase,
+	createErrorResponse,
+	createSuccessResponse
+} from "../_shared/utils.ts";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2"; // Import Supabase client
+// Import vm-state-manager for serialization/deserialization
+import { saveStackRun, _generateUUID } from "./vm-state-manager.ts";
+
+// Define corsHeaders here
+const corsHeaders = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+	"Access-Control-Allow-Methods": "POST, OPTIONS"
+};
+
+// Define QuickJSAsyncWASMModule type
+interface QuickJSAsyncWASMModule extends QuickJSWASMModule {
+	newRuntime: () => QuickJSRuntime;
+}
 
 // console.log("[Host Pre-Init] Imports completed for quickjs/index.ts.");
-
-interface LogEntry {
-	level: "log" | "error" | "warn" | "info" | "debug";
-	message: string;
-	source: "host" | "vm";
-	data?: any[];
-}
-
-function simpleStringify(obj: any, space?: number | string): string {
-	try {
-		return JSON.stringify(
-			obj,
-			(key, value) => (typeof value === "bigint" ? value.toString() : value),
-			space,
-		);
-	} catch (e) {
-		console.error("[Host] simpleStringify Error:", e);
-		return `{"error": "Failed to stringify object"}`;
-	}
-}
 
 function createHandleFromJson(context: QuickJSContext, jsValue: any, handles: QuickJSHandle[]): QuickJSHandle {
 	switch (typeof jsValue) {
@@ -65,994 +70,1712 @@ function createHandleFromJson(context: QuickJSContext, jsValue: any, handles: Qu
 }
 
 function createHandleFromJsonNoTrack(context: QuickJSAsyncContext, jsValue: any, handles?: QuickJSHandle[] /* Optional tracking */): QuickJSHandle {
-	const jsonString = simpleStringify(jsValue);
-	const evalResult = context.evalCode(`JSON.parse(${JSON.stringify(jsonString)})`);
-	if (evalResult.error) {
-		console.error("[Host] Error parsing JSON via evalCode:", context.dump(evalResult.error));
-		evalResult.error.dispose();
-		return context.undefined;
+	// Implementation similar to createHandleFromJson but without pushing to handles array unless provided
+	// This is a separate function to make it clearer when we're tracking or not
+	const track = handles !== undefined;
+	switch (typeof jsValue) {
+		case 'string': { const handle = context.newString(jsValue); if (track) handles!.push(handle); return handle; }
+		case 'number': { const handle = context.newNumber(jsValue); if (track) handles!.push(handle); return handle; }
+		case 'boolean': { const handle = jsValue ? context.true : context.false; if (track) handles!.push(handle); return handle; }
+		case 'undefined': { const handle = context.undefined; if (track) handles!.push(handle); return handle; }
+		case 'object':
+			if (jsValue === null) { const handle = context.null; if (track) handles!.push(handle); return handle; }
+			if (Array.isArray(jsValue)) {
+				const arrayHandle = context.newArray();
+				if (track) handles!.push(arrayHandle);
+				for (let i = 0; i < jsValue.length; i++) {
+					const itemHandle = createHandleFromJsonNoTrack(context, jsValue[i], track ? handles : undefined);
+					context.setProp(arrayHandle, i, itemHandle);
+				}
+				return arrayHandle;
+			} else {
+				const objHandle = context.newObject();
+				if (track) handles!.push(objHandle);
+				for (const key in jsValue) {
+					if (Object.prototype.hasOwnProperty.call(jsValue, key)) {
+						const valueHandle = createHandleFromJsonNoTrack(context, jsValue[key], track ? handles : undefined);
+						context.setProp(objHandle, key, valueHandle);
+					}
+				}
+				return objHandle;
+			}
+		default:
+			console.warn(`[Host] Unsupported type in createHandleFromJsonNoTrack: ${typeof jsValue}`);
+			const handle = context.undefined;
+			if (track) handles!.push(handle);
+			return handle;
 	}
-	if (handles) handles.push(evalResult.value); // Track handle if array provided
-	return evalResult.value;
 }
 
 async function callNestedHostProxy(proxy: any, chain: string[], args: any[]): Promise<any> {
-	// console.log(`[Host Helper] Reconstructing call: Chain=${chain.join('.')}...`); // VERBOSE
+	// This helper remains useful for the actual invocation *after* pause/resume
+	hostLog("HostHelper", "debug", `Reconstructing call: Chain=${chain.join('.')}...`); 
 	let currentProxy = proxy;
 	for (let i = 0; i < chain.length; i++) {
 		const prop = chain[i];
 		if (!currentProxy || typeof currentProxy[prop] === 'undefined') {
 			throw new Error(`[Host Helper] Property '${prop}' not found in chain.`);
 		}
-		// console.log(`[Host Helper] Accessing proxy property: ${prop}`); // VERY VERBOSE
 		currentProxy = currentProxy[prop];
 	}
-	// console.log(`[Host Helper] Invoking final proxy function with ${args.length} args.`); // VERBOSE
+	hostLog("HostHelper", "debug", `Invoking final proxy function with ${args.length} args.`); 
 	const finalProxy = currentProxy(...args);
-	// console.log(`[Host Helper] Awaiting the finalProxy to trigger execution...`); // VERBOSE
+	hostLog("HostHelper", "debug", "Awaiting the finalProxy to trigger execution..."); 
 	const finalResult = await finalProxy;
-	// Avoid logging potentially large results even at debug
-	// console.log(`[Host Helper] Final result received:`, finalResult); // POTENTIALLY LARGE
-	// console.log("debug", "host", `[Host Helper] Final result received for chain ${chain.join('.')}. Type: ${typeof finalResult}`); // Removed - console.log not defined here
-	return finalResult; // Ensure function returns
+	hostLog("HostHelper", "debug", `Final result received for chain ${chain.join('.')}.`); 
+	return finalResult;
 }
 
-Deno.serve(async (req: Request): Promise<Response> => {
+// REMOVE synchronous hostTaskExecuteFn entirely
+/* 
+const hostTaskExecuteFn = (...) => { ... }; 
+*/
 
-	if (req.method === "OPTIONS") { console.log("[Host] Responding to OPTIONS request"); return new Response("ok", { headers: corsHeaders }); }
+// --- Unified Host Call Handler (Asyncified) ---
+const callHostToolFn = async (
+	ctx: QuickJSAsyncContext,
+	_thisHandle: QuickJSHandle, 
+	toolNameHandle: QuickJSHandle,
+	methodChainHandle: QuickJSHandle, 
+	argsHandle: QuickJSHandle,      
+	hostProxies: { [key: string]: any }
+): Promise<QuickJSHandle> => {
+	let toolName: string | null = null;
+	let methodChain: string[] | null = null;
+	let args: any[] | null = null;
+	let resultHandle: QuickJSHandle | null = null;
 
-	let executionError: string | null = null;
-	let executionResult: any = null;
-	let finalResultHandle: QuickJSHandle | null = null;
-	let runtime: QuickJSRuntime | null = null;
-	let context: QuickJSAsyncContext | null = null;
-	const handles: QuickJSHandle[] = [];
-	const hostProxies: { [key: string]: any } = {}; // Store actual host proxies here
-
-	// Define startTimestamp here so it's accessible in finally block
 	try {
-		//console.log("info", "host", "Processing request...");
-		const { code, input = {}, modules = {}, serviceProxies = [], runtimeConfig = {} } = await req.json();
-		const executionTimeoutSeconds = runtimeConfig.executionTimeoutSeconds ?? 360; // Default 36 seconds (doubled)
-		// Removed verbose debug log of request body details
-		// console.log("debug", "host", "Request body parsed.", [ ... ]); // REMOVED
-		if (typeof code !== "string" || code.trim() === "") { throw new Error("Missing or empty 'code' property"); }
-		if (!Array.isArray(serviceProxies)) { throw new Error("'serviceProxies' must be an array"); }
-		if (!runtimeConfig || !runtimeConfig.supabaseUrl || !runtimeConfig.supabaseAnonKey) {
-			console.log("error", "host", "Missing critical runtimeConfig properties (supabaseUrl, supabaseAnonKey)", [runtimeConfig]);
-			throw new Error("Missing critical runtimeConfig properties");
+		toolName = ctx.getString(toolNameHandle);
+		methodChain = ctx.dump(methodChainHandle); 
+		args = ctx.dump(argsHandle); 
+
+		if (!toolName || !Array.isArray(methodChain) || !Array.isArray(args)) {
+			throw new Error("Invalid arguments passed to __callHostTool__");
 		}
 
-		// Reduce verbosity - initializing QuickJS is expected
-		// console.log("debug", "host", "Initializing QuickJS WASM module..."); // REMOVED
-		const quickjs = await getQuickJS();
-		// console.log("debug", "host", "QuickJS WASM module initialized."); // REMOVED
+		hostLog("HostCall", "info", `Invoking: ${toolName}.${methodChain.join('.')}(...)`);
 
-		//console.log("debug", "host", "Setting up QuickJS Async context...");
-		context = await newAsyncContext();
-		if (!context) {
-			throw new Error("Failed to create QuickJSAsyncContext");
-		}
-		const ctx: QuickJSAsyncContext = context;
-		runtime = context.runtime;
-		if (!runtime) {
-			throw new Error("Failed to get runtime from QuickJSAsyncContext");
-		}
-		const rt = runtime;
-
-		rt.setMemoryLimit(8 * 1024 * 1024); // Doubled memory limit to 512MB
-		rt.setMaxStackSize(2 * 1024 * 1024); // Doubled stack size to 2MB
-		// console.log("debug", "host", "Runtime limits set."); // REMOVED
-
-		// --- Create Host-Side Service Proxies ---
-		// console.log("debug", "host", "Creating host-side service proxies..."); // REMOVED
-		try {
-			for (const proxyConfig of serviceProxies) {
-				if (!proxyConfig.name || !proxyConfig.baseUrl) {
-					console.log("warn", "host", "Skipping invalid service proxy config (missing name or baseUrl)", [proxyConfig]);
-					continue;
-				}
-				hostProxies[proxyConfig.name] = createServiceProxy(proxyConfig.name, {
-					baseUrl: proxyConfig.baseUrl,
-				headers: proxyConfig.headers || {},
-				});
-				// console.log("debug", "host", `Created host proxy for '${proxyConfig.name}'`); // REMOVED
-			}
-		} catch (proxyError) {
-			console.log("error", "host", "Error creating host service proxies", [proxyError]);
-			throw new Error(`Failed to create service proxies: ${proxyError instanceof Error ? proxyError.message : String(proxyError)}`);
+		// Find the actual host proxy instance
+		const targetHostProxy = hostProxies[toolName];
+		if (!targetHostProxy) {
+			throw new Error(`Host proxy for tool '${toolName}' not found.`);
 		}
 
-		// --- Inject Globals ---
+		// Generate a unique stack run ID
+        const stackRunId = crypto.randomUUID();
+        
+        // Create a stack run record and exit instead of directly executing
+        // This handles all async operations as stack run boundaries
+        hostLog("HostCall", "info", `Creating stack run ${stackRunId} for ${toolName}.${methodChain.join('.')}`);
+        
+        try {
+            // Convert the method chain to a method name string (the last item in the chain)
+            const methodName = methodChain.join('.');
+            
+            // Save the stack run to the database using saveStackRun from vm-state-manager.ts
+            await saveStackRun(
+                stackRunId,
+                toolName,
+                methodName,
+                args
+            );
+            
+            // Return a special marker that tells the VM to pause execution
+            // and restore later when the stack run completes
+            const pauseMarker = {
+                __vmPauseMarker: true,
+                stackRunId: stackRunId,
+                toolName: toolName,
+                methodChain: methodChain,
+                args: args
+            };
+            
+            // Convert the pause marker to a handle
+            resultHandle = createHandleFromJsonNoTrack(ctx, pauseMarker);
+            return resultHandle;
+        } catch (saveError) {
+            const errorMessage = saveError instanceof Error ? saveError.message : String(saveError);
+            hostLog("HostCall", "error", `Failed to save stack run: ${errorMessage}`);
+            throw new Error(`Failed to save stack run: ${errorMessage}`);
+        }
+	} catch (error: unknown) {
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		hostLog("HostCall", "error", `Error in host call for ${toolName || 'unknown'}.${methodChain?.join('.') || 'unknown'}:`, errorMessage);
+		// Create an error handle instead of throwing
+        try {
+            const errorObj = { __vmError: true, message: errorMessage };
+            return createHandleFromJsonNoTrack(ctx, errorObj);
+        } catch (handleError) {
+            const handleErrorMessage = handleError instanceof Error ? handleError.message : String(handleError);
+            hostLog("HostCall", "error", `Failed to create error handle: ${handleErrorMessage}`);
+            throw new Error(errorMessage);
+        }
+	}
+};
 
-		// Console Patch
-		// console.log("debug", "host", "Injecting globals (console, config, input, fetch, timers, tools, require)..."); // REMOVED
-		const consoleHandle = ctx.newObject(); handles.push(consoleHandle);
+// Helper functions for stack runs are now imported from vm-state-manager.ts
 
 		// Define ONE function factory for all console levels
-		const logFn = (level: LogEntry["level"]) => ctx.newFunction(level, (...argsHandles: QuickJSHandle[]) => {
+const logFn = (level: LogEntry["level"]) => (ctx: QuickJSAsyncContext) => {
+	// Return the function handle directly
+	return ctx.newFunction(level, (...argsHandles: QuickJSHandle[]) => {
 			// Only log to host console, don't add to returned logs unless it's an error
 			try {
 				// --- OPTIMIZATION: Only dump args for errors ---
 				if (level === 'error') {
 					const args = argsHandles.map(h => ctx.dump(h));
 					// Add VM errors to the main logs
-					console.log(level, "vm", `console.error`, args);
+					hostLog("VMConsole", "error", "[console.error]", { content: args });
 				} else {
 					// --- OPTIMIZATION: Assume first arg is string for non-errors, skip typeof ---
 					// For other levels, log only the first argument if it's a string (the message)
 					// This avoids potentially expensive dumping of complex objects for info/debug logs
-					let message = `[VM] [${level.toUpperCase()}]`;
+					let message = `[${level.toUpperCase()}]`;
 					try {
 						if (argsHandles.length > 0) {
 							// Directly try getString, catch if it fails (e.g., not a string)
 							message += ` ${ctx.getString(argsHandles[0])}`;
 						}
 					} catch (_e) {
-						// Ignore error if first arg wasn't a string
-						if (argsHandles.length > 0) {
-							message += ` (Non-string first arg)`;
-						}
+						// Just use a placeholder for non-string first arg
+						message += " [Non-string argument]";
 					}
-					// Log other levels only to the host console for debugging - comment out by default
-					// console.log(message); // REMOVED
+					hostLog("VMConsole", level, message);
 				}
 			} catch (e) {
-				// Log errors during the dump itself to host console and potentially main logs
-				const errorMsg = e instanceof Error ? e.message : String(e);
-				console.error(`[HOST] [ERROR] Error during console.${level} dump`, errorMsg);
-				console.log("error", "host", `Error during console.${level} dump`, [errorMsg]);
+				// Don't fail if logging fails
+				try {
+					hostLog("VMConsole", "error", "Console logging error", { error: String(e) });
+				} catch (_) { /* really last resort */ }
+		}
+	});
+};
+
+// Placeholder factories for console levels
+const consoleLogFactory = logFn("log");
+const consoleErrorFactory = logFn("error");
+const consoleWarnFactory = logFn("warn");
+const consoleInfoFactory = logFn("info");
+const consoleDebugFactory = logFn("debug");
+
+// Helper function to find, remove, and dispose a handle
+function disposeTrackedHandle(handle: QuickJSHandle | undefined | null, handlesArray: QuickJSHandle[], ctxForLog?: QuickJSContext) {
+	if (!handle || !handle.alive) {
+		// hostLog('debug', 'Skipping disposal: Handle is null, undefined, or not alive.');
+		return; 
+	}
+
+	const index = handlesArray.indexOf(handle);
+	if (index > -1) {
+		handlesArray.splice(index, 1); // Remove from tracking array
+	} else {
+		// Optional: Log if handle wasn't found in array - might indicate logic error
+		// If it wasn't tracked, maybe it shouldn't be disposed here?
+		// Let's log a warning for now.
+		hostLog("HandleTracker", "warn", "Handle being disposed was not found in tracking array. Potential logic error.", ctxForLog?.dump(handle));
+	}
+
+	try {
+		// hostLog('debug', 'Disposing handle explicitly.');
+		handle.dispose();
+	} catch (e) {
+		hostLog("HandleTracker", "warn", `Error during explicit handle disposal: ${e instanceof Error ? e.message : String(e)}`);
+	}
+}
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+interface HostCallSuspended {
+	__hostCallSuspended: true;
+	stackRunId: string;
+	serviceName: string;
+	methodName: string;
+}
+
+function isHostCallSuspended(obj: any): obj is HostCallSuspended {
+	return typeof obj === 'object' && obj !== null && obj.__hostCallSuspended === true;
+}
+
+async function serveQuickJsFunction(req: Request) {
+	if (req.method === "OPTIONS") {
+		return new Response("ok", { headers: corsHeaders });
+	}
+
+	let supabaseClient: SupabaseClient;
+	try {
+		// Corrected Supabase client initialization
+		supabaseClient = createClient(SUPABASE_URL!, SUPABASE_SERVICE_KEY!,
+			{
+				global: { headers: { Authorization: req.headers.get('Authorization')! } },
+				auth: { persistSession: false }
 			}
+		);
+	} catch (e) {
+		console.error("[QuickJS] Supabase client init error:", e);
+		return new Response(simpleStringify({ error: "Supabase client failed to initialize", details: e.message }), {
+			status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" }
+		});
+	}
+
+	const requestBody = await req.json();
+	const { taskName: taskNameOrId, input: taskInput, parentRunId: parentTaskRunId } = requestBody;
+
+	if (!taskNameOrId) {
+		return new Response(simpleStringify({ error: "taskName is required" }), {
+			status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" }
+		});
+	}
+
+	let taskRunId: string | null = null;
+	let logPrefix = `[QuickJS ${taskNameOrId}]`;
+	let quickJSInstance: QuickJSAsyncWASMModule | null = null;
+	let vm: QuickJSAsyncContext | null = null;
+	let rt: QuickJSRuntime | null = null;
+
+	try {
+		// Check if this is a direct execution request from stack-processor
+		if (requestBody.directExecution && requestBody.taskName) {
+			const taskName = requestBody.taskName;
+			const taskInput = requestBody.taskInput || {};
+			const stackRunId = requestBody.stackRunId;
+			const parentRunId = requestBody.parentRunId;
+			
+			hostLog("[DIRECT EXECUTION REQUEST FOR TASK: " + taskName.toUpperCase() + "]", "info", "Processing direct execution request");
+			
+			try {
+				// Get Supabase URL and key from environment
+				const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+				const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+				
+				if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+					throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables are required");
+				}
+				
+				hostLog("[Direct Execution]", "info", `Fetching code for task: ${taskName}`);
+				
+				// Fetch the task code
+				let taskCode;
+				try {
+					hostLog("[Direct Execution]", "debug", `Querying task by name: ${taskName}`);
+					const task = await fetchTaskFromDatabase(supabaseClient, taskName, null, 
+						(msg) => hostLog("[Direct Execution]", "debug", msg));
+					
+					if (!task) {
+						throw new Error(`Task not found: ${taskName}`);
+					}
+					
+					hostLog("[Direct Execution]", "debug", `Task found: ${taskName}`);
+					taskCode = task;
+				} catch (error) {
+					hostLog("[Direct Execution]", "error", `Error fetching task: ${error instanceof Error ? error.message : String(error)}`);
+					throw new Error(`Error fetching task: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				
+				// Execute the task directly
+				const result = await executeTaskDirect(taskCode, taskName, taskInput, stackRunId, parentRunId);
+				
+				// If this request has a stackRunId, update the record status
+				if (stackRunId) {
+					try {
+						const { error: updateError } = await supabaseClient
+							.from('stack_runs')
+							.update({
+								status: 'completed',
+								result,
+								updated_at: new Date().toISOString()
+							})
+							.eq('id', stackRunId);
+							
+						if (updateError) {
+							hostLog("[Direct Execution]", "error", `Failed to update stack_run status: ${updateError.message}`);
+						}
+					} catch (error) {
+						hostLog("[Direct Execution]", "error", `Error updating stack_run: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+				
+				return new Response(JSON.stringify({ 
+					result, 
+					status: "completed"
+				}), {
+					status: 200, 
+					headers: { 'Content-Type': 'application/json', ...corsHeaders }
+				});
+			} catch (error) {
+				hostLog(logPrefix, 'error', "Unhandled error during QuickJS task execution:", error, error.stack);
+				if (stackRunId) {
+					try {
+						await supabaseClient.from('task_runs').update({
+							status: 'failed',
+							error: { message: error.message, stack: error.stack },
+							updated_at: new Date().toISOString(),
+							ended_at: new Date().toISOString()
+						}).eq('id', stackRunId);
+					} catch (dbError) {
+						hostLog(logPrefix, 'error', "Additionally, failed to update task_run with error state:", dbError);
+					}
+				}
+				return new Response(simpleStringify({ error: error.message, stack: error.stack }), {
+					status: 500,
+					headers: { ...corsHeaders, "Content-Type": "application/json" }
+				});
+			}
+		}
+
+		const taskCode = await fetchTaskFromDatabase(supabaseClient, taskNameOrId, null, (msg) => hostLog(logPrefix, 'debug', msg));
+		if (!taskCode) {
+			return new Response(simpleStringify({ error: `Task code for '${taskNameOrId}' not found` }), {
+				status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" }
+			});
+		}
+
+		const { data: taskRunData, error: taskRunInsertError } = await supabaseClient
+			.from('task_runs')
+			.insert({
+				task_name: taskNameOrId,
+				parent_run_id: parentTaskRunId,
+				status: 'processing',
+				input: taskInput,
+				started_at: new Date().toISOString()
+			})
+			.select('id')
+			.single();
+
+		if (taskRunInsertError) {
+			console.error("[QuickJS] Failed to insert task_run:", taskRunInsertError);
+			throw new Error(`Failed to create task_run: ${taskRunInsertError.message}`);
+		}
+		taskRunId = taskRunData.id;
+		logPrefix = `[QuickJS ${taskRunId} (${taskNameOrId})]`;
+		hostLog(logPrefix, 'info', "Task run created. Initializing VM.");
+
+		quickJSInstance = await getQuickJS();
+		rt = quickJSInstance.newRuntime();
+		vm = await newAsyncContext(rt as unknown as any);
+
+		const callHostToolFn = vm.newAsyncifiedFunction("__callHostTool__", async (
+			serviceNameHandle: QuickJSHandle,
+			methodChainHandle: QuickJSHandle,
+			argsHandle: QuickJSHandle
+		) => {
+			const serviceName = vm!.getString(serviceNameHandle);
+			const methodChainArray = vm!.dump(methodChainHandle) as string[];
+			const methodName = methodChainArray.join('.');
+			const args = vm!.dump(argsHandle);
+			hostLog(logPrefix, 'info', `[Host Call Attempt] ${serviceName}.${methodName} with args:`, args);
+
+			const { data: stackRun, error: stackRunError } = await supabaseClient
+				.from('stack_runs')
+				.insert({
+					parent_task_run_id: taskRunId,
+					service_name: serviceName,
+					method_name: methodName,
+					args: args,
+					status: 'pending',
+					created_at: new Date().toISOString(),
+					updated_at: new Date().toISOString()
+				})
+				.select('id')
+				.single();
+
+			if (stackRunError) {
+				hostLog(logPrefix, 'error', `Failed to create stack_run for ${serviceName}.${methodName}: ${stackRunError.message}`);
+				// Throw an error that will reject the promise in the VM
+				throw new Error(`HostError: Failed to create stack_run: ${stackRunError.message}`);
+			}
+
+			const newStackRunId = stackRun.id;
+			hostLog(logPrefix, 'info', `Stack_run ${newStackRunId} created for ${serviceName}.${methodName}. Suspending task.`);
+
+			const suspensionMarker: HostCallSuspended = {
+				__hostCallSuspended: true,
+				stackRunId: newStackRunId,
+				serviceName,
+				methodName
+			};
+			// newAutomaticHandle will handle the object correctly for the VM.
+			// The promise returned by this asyncified function will resolve to this marker.
+			return vm!.newAutomaticHandle(suspensionMarker);
+		});
+		vm.setProp(vm.global, "__callHostTool__", callHostToolFn);
+		callHostToolFn.dispose();
+
+		// Generic Proxy for 'tools'
+		const proxyHandlerGet = vm.newFunction("get", (targetHandle: QuickJSHandle, propHandle: QuickJSHandle) => {
+			const pathArray = vm!.dump(targetHandle) as string[]; // Path stored in target
+			const prop = vm!.getString(propHandle);
+			const newPath = [...pathArray, prop];
+
+			// Return a new function that when called, will invoke __callHostTool__ with the path
+			const methodCaller = vm!.newAsyncifiedFunction(prop, async (...argHandles: QuickJSHandle[]) => {
+				const serviceName = newPath[0]; 
+				const methodChain = newPath.slice(1);
+				const callArgs = argHandles.map(h => vm!.dump(h));
+				hostLog(logPrefix, 'debug', `[Proxy Call] ${newPath.join('.')} with args:`, callArgs);
+				
+				const globalCallHostTool = vm!.getProp(vm!.global, "__callHostTool__");
+				const serviceNameH = vm!.newString(serviceName);
+				const methodChainH = vm!.unwrapResult(vm!.newAutomaticHandle(methodChain)).handle;
+				const argsH = vm!.unwrapResult(vm!.newAutomaticHandle(callArgs)).handle;
+
+				const promiseHandle = vm!.callFunction(globalCallHostTool, vm!.undefined, serviceNameH, methodChainH, argsH);
+				
+				serviceNameH.dispose();
+				methodChainH.dispose();
+				argsH.dispose();
+				globalCallHostTool.dispose();
+				return promiseHandle; // This is a promise from __callHostTool__
+			});
+			
+			// To allow further chaining, e.g., tools.service.group.method
+			// we need to return an object that can be further proxied or is the callable function.
+			// For simplicity, if it's not `log`, assume it could be a chain or a method.
+			// A more robust proxy would distinguish better.
+			if (prop === 'log') { // Special handle for synchronous tools.log
+				 methodCaller.dispose(); // Dispose the async one we just made for log
+				 return vm!.getProp(vm!.getProp(vm!.global, "host"),"log"); // Return host.log directly
+			}
+			
+			// Create a new target for the next level proxy, storing the current path
+			const nextTargetHandle = vm!.unwrapResult(vm!.newAutomaticHandle(newPath)).handle;
+			const nextProxy = vm!.newProxy(nextTargetHandle, vm!.getProp(vm!.global, "__toolsProxyHandler")); // Assuming handler is on global
+			// nextTargetHandle is now managed by nextProxy, no dispose needed here by us.
+			// However, the proxy target should be an object, not an array for general use.
+			// This proxy part needs to be more robust for deep chaining if methods and objects are mixed.
+			// Let's simplify: any access returns a function that calls __callHostTool__.
+			return methodCaller; 
 		});
 
-		// Create handles using the factory and track them
-		const logHandle = logFn("log"); handles.push(logHandle);
-		const errorHandle = logFn("error"); handles.push(errorHandle);
-		const warnHandle = logFn("warn"); handles.push(warnHandle);
-		const infoHandle = logFn("info"); handles.push(infoHandle);
-		const debugHandle = logFn("debug"); handles.push(debugHandle);
+		const toolsProxyHandler = vm.newObject();
+		vm.setProp(toolsProxyHandler, "get", proxyHandlerGet);
+		proxyHandlerGet.dispose();
+		vm.setProp(vm.global, "__toolsProxyHandler", toolsProxyHandler); // For recursive proxy
+		toolsProxyHandler.dispose();
 
-		// Set properties on the consoleHandle using the created handles
-		ctx.setProp(consoleHandle, "log", logHandle);
-		ctx.setProp(consoleHandle, "error", errorHandle);
-		ctx.setProp(consoleHandle, "warn", warnHandle);
-		ctx.setProp(consoleHandle, "info", infoHandle);
-		ctx.setProp(consoleHandle, "debug", debugHandle);
+		// The initial target for the `tools` proxy is an empty array representing the root path.
+		const rootProxyTarget = vm.unwrapResult(vm.newAutomaticHandle([])).handle; 
+		const toolsProxy = vm.newProxy(rootProxyTarget, vm.getProp(vm.global, "__toolsProxyHandler"));
+		rootProxyTarget.dispose();
+		vm.setProp(vm.global, "tools", toolsProxy);
+		// toolsProxy is now owned by global
 
-		// Set the global console object
-		ctx.setProp(ctx.global, "console", consoleHandle);
+		// Synchronous host.log for direct VM logging
+		const hostObject = vm.newObject();
+		const hostLogFn = vm.newFunction("log", (levelHandle, ...messageHandles) => {
+			const level = vm.getString(levelHandle);
+			const messages = messageHandles.map(h => vm.dump(h));
+			hostLog(logPrefix, level, `[VM host.log]`, ...messages);
+		});
+		vm.setProp(hostObject, "log", hostLogFn);
+		hostLogFn.dispose();
+		vm.setProp(vm.global, "host", hostObject);
+		hostObject.dispose();
+		hostLog(logPrefix, 'info', "VM Initialized with __callHostTool__ and generic tools proxy.");
 
-		// Runtime Config
-		const injectedRuntimeConfigHandle = createHandleFromJsonNoTrack(ctx, runtimeConfig, handles); handles.push(injectedRuntimeConfigHandle);
-		ctx.setProp(ctx.global, "__runtimeConfig__", injectedRuntimeConfigHandle);
-
-		// Input
-		const inputObjectHandle = createHandleFromJsonNoTrack(ctx, input, handles); handles.push(inputObjectHandle);
-		ctx.setProp(ctx.global, "__input__", inputObjectHandle);
-
-		// Fetch Patch (uses Deno fetch)
-		const fetchFn = (urlHandle: QuickJSHandle, optionsHandle?: QuickJSHandle): QuickJSHandle => {
-			if (!ctx?.alive || !rt?.alive) {
-				// Log error directly, don't add to logs array unless critical path
-				console.error("[HOST] [ERROR] [fetch Patch] Runtime/Context disposed before call.");
-				const earlyError = ctx.newError("Runtime disposed");
-				handles.push(earlyError);
-				const earlyPromise = ctx.newPromise();
-				handles.push(earlyPromise.handle);
-				earlyPromise.reject(earlyError);
-				Promise.resolve().then(() => rt?.executePendingJobs());
-				return earlyPromise.handle;
-			}
-
-			const deferred = ctx.newPromise();
-			handles.push(deferred.handle);
-
-			const runPendingJobs = () => {
-				if (rt?.alive) {
-					try {
-						const jobResult = rt.executePendingJobs();
-						if (jobResult.error) {
-							let dump = "Context disposed?";
-							try {
-								dump = ctx?.dump(jobResult.error) ?? dump;
-							} catch (_e) { /* Ignore dump errors */ }
-							// Log error directly
-							console.error("[HOST] [ERROR] [fetch Patch] Error executing pending jobs after fetch promise settlement:", dump);
-							jobResult.error.dispose();
-						}
-					} catch (jobError) {
-						console.error("[HOST] [ERROR] [fetch Patch] Exception during executePendingJobs after fetch promise settlement:", jobError);
-					}
-				} else {
-					// console.warn("[HOST] [WARN] [fetch Patch] Runtime disposed before executePendingJobs after fetch promise settlement."); // REMOVED Warning
-				}
-			};
-			deferred.settled.then(runPendingJobs);
-
-			// Extract url and options eagerly, but perform fetch async
-			let url: string;
-			let options: RequestInit;
-			try {
-				url = ctx.getString(urlHandle);
-				options = optionsHandle ? ctx.dump(optionsHandle) : {};
-				// Log VM fetch calls directly - remove for less noise
-				// console.log(`[VM] fetch called: ${url}`, options); // REMOVED
-			} catch (dumpError) {
-				if (!ctx?.alive || !deferred.handle.alive) return deferred.handle;
-				const dumpErrorHandle = createHandleFromJsonNoTrack(ctx, dumpError, handles);
-				handles.push(dumpErrorHandle);
-				deferred.reject(dumpErrorHandle);
-				return deferred.handle;
-			}
-
-			// Actual fetch happens async
-			fetch(url, options).then(async response => {
-				if (!ctx?.alive || !deferred.handle.alive) {
-					console.warn("[HOST] [WARN] [fetch Patch] Context/Promise disposed before fetch response processing.");
-					return;
-				}
-				const localHandles: QuickJSHandle[] = []; // Handles for this async block
+		// Set up global objects
+		const consoleObj = vm.newObject();
+		
+		// Add console.log and other methods
+		for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+			const logFn = vm.newFunction(level, (...args: QuickJSHandle[]) => {
 				try {
-					// --- OPTIMIZATION: Use evalCode to create base response object --- 
-					const responseEvalResult = ctx.evalCode(`({
-						status: ${response.status},
-						statusText: ${JSON.stringify(response.statusText)},
-						ok: ${response.ok},
-						url: ${JSON.stringify(response.url)}
-					})`);
-					if (responseEvalResult.error) {
-						localHandles.push(responseEvalResult.error);
-						throw new Error(`Fetch response object creation failed: ${ctx.dump(responseEvalResult.error)}`);
-					}
-					const r = responseEvalResult.value; // This is our base response handle
-					localHandles.push(r);
-					// ----------------------------------------------------------------
-
-					// --- OPTIMIZATION: Process Headers using JSON stringify/parse ---
-					const headersObj: { [key: string]: string } = {};
-					for (const [k, v] of response.headers.entries()) {
-						headersObj[k] = v;
-					}
-					const headersJson = simpleStringify(headersObj);
-					const headersEvalResult = ctx.evalCode(`JSON.parse(${JSON.stringify(headersJson)})`);
-					if (headersEvalResult.error) {
-						const errDump = ctx.dump(headersEvalResult.error);
-						headersEvalResult.error.dispose();
-						throw new Error(`Fetch headers object creation failed: ${errDump}`);
-					}
-					const h = headersEvalResult.value;
-					localHandles.push(h);
-					// -------------------------------------------------------------
-					ctx.setProp(r, "headers", h);
-
-					// Body methods need to be functions that return handles
-					const bodyText = await response.text(); // Read body once
-					const textFn = ctx.newFunction('text', () => {
-						if (!ctx?.alive) throw new Error("Context disposed");
-						const textHandle = ctx.newString(bodyText);
-						handles.push(textHandle);
-						return textHandle;
-					});
-					localHandles.push(textFn); ctx.setProp(r, 'text', textFn);
-					const jsonFn = ctx.newFunction('json', () => {
-						if (!ctx?.alive) throw new Error("Context disposed");
+					const stringArgs = args.map(arg => {
 						try {
-							const jsonEvalResult = ctx.evalCode(`(${bodyText})`);
-							if (jsonEvalResult.error) {
-								const parseErrorHandle = jsonEvalResult.error;
-								handles.push(parseErrorHandle);
-								throw new Error(`JSON parse error: ${JSON.stringify(ctx.dump(parseErrorHandle))}`);
-							}
-							handles.push(jsonEvalResult.value);
-							return jsonEvalResult.value;
+							return vm!.typeof(arg) === 'string' 
+								? vm!.getString(arg) 
+								: JSON.stringify(vm!.dump(arg));
 						} catch (e) {
-							const m = e instanceof Error ? e.message : String(e);
-							const qe = ctx.newError(m); handles.push(qe);
-							throw qe; // Throw the QuickJS error handle
+							return "[Complex Object]";
 						}
 					});
-					localHandles.push(jsonFn); ctx.setProp(r, 'json', jsonFn);
-					const responseHandle = r;
-
-					if (ctx?.alive && deferred.handle.alive) {
-						// Reduce verbosity
-						// console.log("debug", "host", "[fetch Patch] Resolving VM promise.");
-						deferred.resolve(responseHandle);
-						try {
-							if (rt?.alive) {
-								// Reduce verbosity
-								// console.log("debug", "host", "[fetch Patch] Running pending jobs after resolve.");
-								const jobResult = rt.executePendingJobs();
-								if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
-							} else {
-								console.warn("[HOST] [WARN] [fetch Patch] Runtime not alive for post-resolve executePendingJobs.");
-							}
-						} catch (e) {
-							console.error("[HOST] [ERROR] [fetch Patch] Exception in post-resolve executePendingJobs", e);
-						}
-					} else {
-						console.warn("[HOST] [WARN] [fetch Patch] Context/Promise disposed before resolving.");
-					}
-				} catch (processError) {
-					console.log("error", "host", "[fetch Patch] Error processing fetch response", [processError]);
-					if (ctx?.alive && deferred.handle.alive) {
-						const errorHandle = createHandleFromJsonNoTrack(ctx, processError, handles);
-						handles.push(errorHandle);
-						deferred.reject(errorHandle);
-						try {
-							if (rt?.alive) {
-								// Reduce verbosity
-								// console.log("debug", "host", "[fetch Patch] Running pending jobs after reject (processing error).");
-								const jobResult = rt.executePendingJobs();
-								if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
-							} else {
-								console.warn("[HOST] [WARN] [fetch Patch] Runtime not alive for post-reject executePendingJobs.");
-							}
-						} catch (e) {
-							console.error("[HOST] [ERROR] [fetch Patch] Exception in post-reject executePendingJobs", e);
-						}
-					} else {
-						console.warn("[HOST] [WARN] [fetch Patch] Context/Promise disposed before rejecting (processing error).");
-					}
-				} finally {
-					localHandles.forEach(h => { if (h?.alive) h.dispose(); });
-				}
-			}).catch(networkError => {
-				console.log("error", "host", `[fetch Patch] Network error during fetch for ${url}`, [networkError]);
-				if (ctx?.alive && deferred.handle.alive) {
-					const errorHandle = createHandleFromJsonNoTrack(ctx, networkError, handles);
-					handles.push(errorHandle);
-					deferred.reject(errorHandle);
-					try {
-						if (rt?.alive) {
-							// Reduce verbosity
-							// console.log("debug", "host", "[fetch Patch] Running pending jobs after reject (network error).");
-							const jobResult = rt.executePendingJobs();
-							if (jobResult.error) { ctx.dump(jobResult.error); jobResult.error.dispose(); }
-						} else {
-							console.warn("[HOST] [WARN] [fetch Patch] Runtime not alive for post-reject executePendingJobs.");
-						}
-					} catch (e) {
-						console.error("[HOST] [ERROR] [fetch Patch] Exception in post-reject executePendingJobs", e);
-					}
-				} else {
-					console.warn("[HOST] [WARN] [fetch Patch] Context/Promise disposed before rejecting (network error).");
-				}
-			});
-
-			return deferred.handle;
-		};
-
-		const fetchHandle = ctx.newFunction("fetch", fetchFn);
-		handles.push(fetchHandle);
-		ctx.setProp(ctx.global, "fetch", fetchHandle);
-
-		// --- Timer Injection ---
-		// console.log("debug", "host", "Injecting setTimeout and clearTimeout..."); // REMOVED
-		const activeTimers = new Map<number, number>();
-		let nextVmTimerId = 1;
-
-		const setTimeoutVm = (
-			callbackHandle: QuickJSHandle,
-			delayHandle: QuickJSHandle,
-			...argsHandles: QuickJSHandle[]
-		) => {
-			if (!ctx?.alive || !rt?.alive) {
-				console.error("[HOST] [ERROR] [setTimeout] Runtime/Context disposed.");
-				return ctx.newNumber(0);
-			}
-			if (ctx.typeof(callbackHandle) !== "function") {
-				console.error("[HOST] [ERROR] [setTimeout] Provided callback is not a function.");
-				return ctx.newNumber(0);
-			}
-			const delay = ctx.getNumber(delayHandle);
-			const vmTimerId = nextVmTimerId++;
-
-			const persistentCallbackHandle = callbackHandle.dup();
-			// --- OPTIMIZATION: Don't add setTimeout handles to global list ---
-			// handles.push(persistentCallbackHandle); // REMOVED from global tracking
-			const persistentArgsHandles = argsHandles.map(arg => {
-				const dupArg = arg.dup();
-				// handles.push(dupArg); // REMOVED from global tracking
-				return dupArg;
-			});
-
-			const hostTimerId = setTimeout(() => {
-				activeTimers.delete(vmTimerId); // Delete timer ID immediately
-
-				if (!ctx?.alive || !rt?.alive || !persistentCallbackHandle.alive) {
-					// Reduce verbosity
-					// console.warn(`[HOST] [WARN] [setTimeout Callback ${vmTimerId}] Runtime/Context/Callback disposed before execution.`);
-					// --- Dispose handles locally --- 
-					if (persistentCallbackHandle?.alive) persistentCallbackHandle.dispose();
-					persistentArgsHandles.forEach(h => { if (h?.alive) h.dispose(); });
-					return;
-				}
-				// Reduce verbosity
-				// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Executing...`);
-				let result: { value?: QuickJSHandle, error?: QuickJSHandle } | null = null;
-				try {
-					result = ctx.callFunction(persistentCallbackHandle, ctx.undefined, ...persistentArgsHandles);
-				} catch (callError) {
-					console.log("error", "vm", `[setTimeout Callback ${vmTimerId}] Exception during callFunction:`, [callError]);
-					// Ensure handles are disposed even if callFunction throws
-				} finally {
-					// --- Dispose handles locally --- 
-					if (persistentCallbackHandle?.alive) persistentCallbackHandle.dispose();
-					persistentArgsHandles.forEach(h => { if (h?.alive) h.dispose(); });
-				}
-
-				// Process result after handles are disposed (if result exists)
-				if (result) {
-					if (result.error) {
-						// Only dump error if context is still alive
-						const errorDump = ctx?.alive ? ctx.dump(result.error) : "Context disposed";
-						console.log("error", "vm", `[setTimeout Callback ${vmTimerId}] Error during execution:`, [errorDump]);
-						if (result.error.alive) result.error.dispose(); // Dispose error handle
-					} else {
-						// Reduce verbosity
-						// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Execution finished. Disposing result.`);
-						if (result.value?.alive) result.value.dispose(); // Dispose success handle
-					}
-				}
-
-				// Job execution after callback
-				try {
-					if (rt?.alive) {
-						// Reduce verbosity
-						// console.log(`[HOST] [DEBUG] [setTimeout Callback ${vmTimerId}] Running pending jobs after callback.`);
-						const jobResult = rt.executePendingJobs();
-						if (jobResult.error) {
-							console.error("[HOST] [ERROR] [setTimeout Callback] Error in post-callback executePendingJobs", ctx?.dump(jobResult.error));
-							jobResult.error.dispose();
-						}
-					} else {
-						// console.warn("[HOST] [WARN] [setTimeout Callback] Runtime not alive for post-callback executePendingJobs.");
-					}
+					hostLog(level as "info" | "debug" | "warn" | "error" | "log", 
+						logPrefix, `[VM] ${stringArgs.join(' ')}`, {});
 				} catch (e) {
-					console.error("[HOST] [ERROR] [setTimeout Callback] Exception in post-callback executePendingJobs", e);
+					hostLog("error", logPrefix, `[VM Console] Error logging: ${e}`, {});
 				}
-
-			}, delay);
-
-			activeTimers.set(vmTimerId, hostTimerId);
-			// Removed repetitive timer scheduling log
-			// console.log(`[VM] setTimeout scheduled timer ${vmTimerId} (Host ID: ${hostTimerId}) for ${delay}ms`);
-			return ctx.newNumber(vmTimerId);
-		};
-
-		const clearTimeoutVm = (vmTimerIdHandle: QuickJSHandle) => {
-			if (!ctx?.alive) {
-				console.error("[HOST] [ERROR] [clearTimeout] Context disposed.");
-				return;
-			}
-			const vmTimerId = ctx.getNumber(vmTimerIdHandle);
-			const hostTimerId = activeTimers.get(vmTimerId);
-			if (hostTimerId) {
-				clearTimeout(hostTimerId);
-				activeTimers.delete(vmTimerId);
-				// Removed repetitive timer clearing log
-				// console.log(`[VM] clearTimeout cleared timer ${vmTimerId} (Host ID: ${hostTimerId})`);
-			} else {
-				// Log warning directly
-				// console.warn(`[VM] [WARN] [clearTimeout] Timer ID ${vmTimerId} not found or already cleared.`);
-			}
-		};
-
-		// Inject into global scope
-		const setTimeoutHandle = ctx.newFunction("setTimeout", setTimeoutVm);
-		handles.push(setTimeoutHandle);
-		ctx.setProp(ctx.global, "setTimeout", setTimeoutHandle);
-
-		const clearTimeoutHandle = ctx.newFunction("clearTimeout", clearTimeoutVm);
-		handles.push(clearTimeoutHandle);
-		ctx.setProp(ctx.global, "clearTimeout", clearTimeoutHandle);
-
-		// console.log("debug", "host", "setTimeout and clearTimeout injected."); // REMOVED
-		// --- End Timer Injection ---
-
-		// Placeholder module object - Reduced verbosity
-		// console.log("debug", "host", "Injecting placeholder module object..."); // REMOVED
-		const moduleObjHandle = ctx.newObject(); handles.push(moduleObjHandle);
-		ctx.setProp(moduleObjHandle, "exports", ctx.undefined);
-		ctx.setProp(ctx.global, "module", moduleObjHandle);
-
-		// --- Tools Injection --- (Polling based)
-		// console.log("debug", "host", "Injecting 'tools' object and request polling functions..."); // REMOVED
-		const toolsHandle = ctx.newObject(); handles.push(toolsHandle);
-		ctx.setProp(ctx.global, "tools", toolsHandle);
-
-		// --- Request tracking system --- No change needed here, logs are internal
-		const pendingRequests = new Map();
-		let requestCounter = 0;
-		function generateRequestId() {
-			// --- OPTIMIZATION: Remove Date.now() if only per-invocation uniqueness needed ---
-			return `req_${requestCounter++}`;
+			});
+			vm.setProp(consoleObj, level, logFn);
+			logFn.dispose();
 		}
+		
+		vm.setProp(vm.global, "console", consoleObj);
+		consoleObj.dispose();
+		
+		// Set up module export
+		const moduleObj = vm.newObject();
+		const exportsObj = vm.newObject();
+		vm.setProp(moduleObj, "exports", exportsObj);
+		vm.setProp(vm.global, "module", moduleObj);
+		
+		// Create empty tools object with task execution capability
+		const toolsObj = vm.newObject();
+		
+		// Add tasks object with execute method
+		const tasksObj = vm.newObject();
+		const executeMethod = vm.newFunction("execute", (taskNameHandle, inputHandle) => {
+			const nestedTaskName = vm.getString(taskNameHandle);
+			const nestedInput = vm.dump(inputHandle);
+			
+			hostLog(logPrefix, "info", `[VM] Called tasks.execute('${nestedTaskName}')`);
+			
+			// Generate a unique ID for the nested task call
+			const nestedStackRunId = _generateUUID();
+			
+			// Save the call to stack_runs table
+			hostLog(logPrefix, "info", `[VM] Creating stack run for nested task: ${nestedTaskName}`);
+			
+			// Create a promise that will be resolved by the stack processor
+			const promise = vm.newPromise();
 
-		// --- Inject __registerHostRequest__ function --- No change needed here, logs are internal
-		const registerHostRequestFn = (serviceNameHandle: QuickJSHandle, propChainHandle: QuickJSHandle, argsHandle: QuickJSHandle) => {
-			if (!ctx?.alive || !rt?.alive) { /* ... */ throw ctx.newError("Runtime disposed"); }
-			let serviceName: string, propChain: any[], args: any[];
-			try {
-				serviceName = ctx.getString(serviceNameHandle);
-				propChain = ctx.dump(propChainHandle);
-				args = ctx.dump(argsHandle);
-				if (!Array.isArray(propChain) || !Array.isArray(args)) { throw new Error("Invalid propChain or args"); }
-			} catch (dumpError) { /* ... */ throw new Error(`Failed to get arguments: ...`); }
-			const requestId = generateRequestId();
-			let methodChain: string[];
-			if (propChain.every(item => typeof item === 'string')) { methodChain = propChain; }
-			else { methodChain = propChain.map(item => typeof item === 'object' && item !== null && 'property' in item ? item.property : String(item)); }
-
-			// Log registration directly - Removed for less noise
-			// console.log(`[HOST] [DEBUG] Registering host request: ${requestId} for ${serviceName}.${methodChain.join('.')} with ${args.length} args`); // REMOVED
-			pendingRequests.set(requestId, { status: 'pending' });
-			const proxy = hostProxies[serviceName];
-			if (!proxy) {
-				console.log("error", "host", `Host proxy not found for service: ${serviceName}`);
-				pendingRequests.set(requestId, { status: 'rejected', error: `Host proxy not found for service: ${serviceName}` });
-				return ctx.newString(requestId);
-			}
-			callNestedHostProxy(proxy, methodChain, args)
-				.then(result => {
-					//console.log(`[HOST] [DEBUG] Request ${requestId} fulfilled for ${serviceName}.${methodChain.join('.')}`);
-					pendingRequests.set(requestId, { status: 'fulfilled', value: result });
+			// Save the ephemeral call to the database
+			__saveEphemeralCall__(vm, nestedStackRunId, "tasks", "execute", [nestedTaskName, nestedInput], 
+				parentTaskRunId, parentTaskRunId)
+				.then(() => {
+					// Return a marker that this is a suspended call
+					const suspensionMarker = {
+						__hostCallSuspended: true,
+						stackRunId: nestedStackRunId,
+						serviceName: "tasks",
+						methodName: "execute"
+					};
+					const suspensionHandle = vm.newString(JSON.stringify(suspensionMarker));
+					promise.resolve(suspensionHandle);
+					suspensionHandle.dispose();
 				})
-				.catch(error => {
-					const message = error instanceof Error ? error.message : String(error);
-					console.log("error", "host", `Request ${requestId} rejected for ${serviceName}.${methodChain.join('.')}: ${message}`);
-					pendingRequests.set(requestId, { status: 'rejected', error: message });
-					});
-			return ctx.newString(requestId);
-		};
-
-		// --- Inject __checkHostRequestStatus__ function --- No change needed here, logs are internal
-		const checkHostRequestStatusFn = (requestIdHandle: QuickJSHandle) => {
-			if (!ctx?.alive || !rt?.alive) { 
-				console.error("[HOST] [ERROR] checkHostRequestStatus: Context/Runtime disposed");
-				throw ctx.newError("Runtime disposed"); 
-			}
-			let requestId: string;
-			try { requestId = ctx.getString(requestIdHandle); } catch (dumpError: any) { throw new Error(`Failed to get request ID: ${dumpError?.message || dumpError}`); }
-			const request = pendingRequests.get(requestId) || { status: 'pending' };
-			const resultHandle = ctx.newObject(); handles.push(resultHandle);
-			const statusHandle = ctx.newString(request.status); handles.push(statusHandle);
-			ctx.setProp(resultHandle, 'status', statusHandle);
-			if (request.status === 'fulfilled') {
-				const valueHandle = createHandleFromJsonNoTrack(ctx, request.value, handles);
-				handles.push(valueHandle);
-				ctx.setProp(resultHandle, 'value', valueHandle);
-				pendingRequests.delete(requestId);
-			} else if (request.status === 'rejected') {
-				const errorHandle = ctx.newString(request.error); handles.push(errorHandle);
-				ctx.setProp(resultHandle, 'error', errorHandle);
-				pendingRequests.delete(requestId);
-			}
-			return resultHandle;
-		};
-
-		// Register the functions - Reduced verbosity
-		const registerHostRequestHandle = ctx.newFunction('__registerHostRequest__', registerHostRequestFn);
-		handles.push(registerHostRequestHandle);
-		ctx.setProp(ctx.global, "__registerHostRequest__", registerHostRequestHandle);
-		const checkHostRequestStatusHandle = ctx.newFunction('__checkHostRequestStatus__', checkHostRequestStatusFn);
-		handles.push(checkHostRequestStatusHandle);
-		ctx.setProp(ctx.global, "__checkHostRequestStatus__", checkHostRequestStatusHandle);
-		// console.log("debug", "host", "Polling functions injected."); // REMOVED
-
-		// --- Populate VM 'tools' object --- Reduced verbosity
-		// console.log("debug", "host", "Populating VM 'tools' object with service proxies..."); // REMOVED
-		const vmProxyGeneratorCode = `
-(serviceName) => {
-  function createPropertyProxy(path = []) {
-    const baseFunction = function(...args) {
-       const methodName = path.length > 0 ? path[path.length - 1] : '(root)';
-       const methodPath = path;
-       // Log VM proxy calls directly - Remove for less noise
-       // console.log('[VM] Proxy call:', serviceName + '.' + methodPath.join('.'), 'with args:', args.length); // REMOVED
-
-       const requestId = __registerHostRequest__(serviceName, methodPath, args);
-       // Log request ID directly - Remove for less noise
-       // console.log('[VM] Registered request:', requestId); // REMOVED
-
-          return new Promise((resolve, reject) => {
-            let attempts = 0;
-            const maxAttempts = 15000; // ~30 seconds -> Adjusted to 15000 attempts * ~20ms = ~300 seconds (5 min) - generous
-            function checkResult() {
-              attempts++;
-              const result = __checkHostRequestStatus__(requestId);
-              if (result.status === 'pending') {
-                 // --- OPTIMIZATION: Increase polling interval ---
-                 const interval = 2 ** (4+attempts); // Increased from 4/8 to 10/20
-                 if (attempts < maxAttempts) {
-                   setTimeout(checkResult, interval);
-                 } else {
-                   // Log timeout error directly
-                   console.error('[VM] Proxy request timed out:', serviceName + '.' + methodPath.join('.'));
-                   reject(new Error('Request timed out after ' + maxAttempts + ' polling attempts for ' + serviceName + '.' + methodPath.join('.')));
-                 }
-              } else if (result.status === 'fulfilled') {
-                resolve(result.value);
-              } else {
-                 // Log host error directly
-                 console.error('[VM] Host request failed:', serviceName + '.' + methodPath.join('.'), result.error);
-                 reject(new Error('Host request failed for ' + serviceName + '.' + methodPath.join('.') + ': ' + result.error));
-              }
-            }
-            checkResult();
-          });
-    };
-
-    return new Proxy(baseFunction, {
-      get: function(target, prop, receiver) {
-        if (typeof prop === 'symbol' || prop === 'then' || prop === 'catch' || prop === 'finally' || prop === 'toJSON' || prop === 'apply' || prop === 'call' || prop === 'bind') {
-          return Reflect.get(target, prop, receiver);
-        }
-        const newPath = [...path, prop];
-        return createPropertyProxy(newPath);
-      }
-    });
-  }
-  return createPropertyProxy();
-}
-`;
-		const vmProxyGeneratorResult = ctx.evalCode(vmProxyGeneratorCode);
-		if (vmProxyGeneratorResult.error) {
-		  console.log("error", "host", "Failed to evaluate VM proxy generator code");
-		  vmProxyGeneratorResult.error.dispose();
-		  throw new Error("Failed to setup VM proxies");
-		}
-		const vmProxyGeneratorHandle = vmProxyGeneratorResult.value;
-		handles.push(vmProxyGeneratorHandle);
-
-		for (const service of serviceProxies) {
-			const serviceName = service.name;
-			if (!serviceName) continue;
-			// console.log("debug", "host", `Creating VM proxy for service: ${serviceName}`);
-			const serviceNameHandle = ctx.newString(serviceName);
-			handles.push(serviceNameHandle);
-			const vmProxyResult = ctx.callFunction(vmProxyGeneratorHandle, ctx.undefined, serviceNameHandle);
-			if (vmProxyResult.error) {
-				console.log("error", "host", `Failed to create VM proxy for ${serviceName}`, [ctx.dump(vmProxyResult.error)]);
-				vmProxyResult.error.dispose();
+				.catch(err => {
+					const errorHandle = vm.newError(`Error creating stack run: ${err}`);
+					promise.reject(errorHandle);
+					errorHandle.dispose();
+				});
+			
+			return promise.handle;
+		});
+		
+		vm.setProp(tasksObj, "execute", executeMethod);
+		executeMethod.dispose();
+		vm.setProp(toolsObj, "tasks", tasksObj);
+		tasksObj.dispose();
+		
+		// Add basic gapi object with admin.directory.domains functionality
+		const gapiObj = vm.newObject();
+		const adminObj = vm.newObject();
+		const directoryObj = vm.newObject();
+		const domainsObj = vm.newObject();
+		
+		// Create a simple list method for domains
+		const listMethod = trackHandle(vm.newAsyncifiedFunction("list", async (optionsHandle: QuickJSHandle) => {
+			try {
+				const options = vm!.dump(optionsHandle);
+				hostLog(logPrefix, "info", `[VM] Called gapi.admin.directory.domains.list with options: ${JSON.stringify(options)}`);
+				
+				// Generate a unique ID for this stack run
+				const nestedStackRunId = _generateUUID();
+				
+				// Save the ephemeral call to the database
+				await saveStackRun(
+					nestedStackRunId, 
+					"gapi", 
+					"admin.directory.domains.list", 
+					[options], 
+					stackRunId, // Use this stack run as the parent
+					parentTaskRunId // Pass through the original parent task run ID
+				);
+				
+				hostLog(logPrefix, "info", `[VM] Stack run ${nestedStackRunId} created for gapi.admin.directory.domains.list`);
+				
+				// Create a suspension marker as a plain object
+				const suspensionMarkerObj = vm!.newObject();
+				const trueHandle = vm!.true;
+				const stackRunIdHandle = vm!.newString(nestedStackRunId);
+				const serviceNameHandle = vm!.newString("gapi");
+				const methodNameHandle = vm!.newString("admin.directory.domains.list");
+				
+				// Set properties on the object
+				vm!.setProp(suspensionMarkerObj, "__hostCallSuspended", trueHandle);
+				vm!.setProp(suspensionMarkerObj, "stackRunId", stackRunIdHandle);
+				vm!.setProp(suspensionMarkerObj, "serviceName", serviceNameHandle);
+				vm!.setProp(suspensionMarkerObj, "methodName", methodNameHandle);
+				
+				// Clean up temporary handles
+				stackRunIdHandle.dispose();
 				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				return suspensionMarkerObj;
+			} catch (e: unknown) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				hostLog(logPrefix, "error", `[VM] Error in gapi.admin.directory.domains.list: ${errorMessage}`);
+				throw new Error(`Internal error in gapi.admin.directory.domains.list: ${errorMessage}`);
+			}
+		}));
+		
+		// Create authenticate method with improved error handling
+		const authenticateMethod = trackHandle(vm.newAsyncifiedFunction("authenticate", async (scopeHandle: QuickJSHandle) => {
+			try {
+				const scope = vm!.getString(scopeHandle);
+				hostLog(logPrefix, "info", `[VM] Called gapi.authenticate with scope: ${scope}`);
+				
+				// Generate a unique ID for this stack run
+				const nestedStackRunId = _generateUUID();
+				
+				// Save the ephemeral call to the database
+				await saveStackRun(
+					nestedStackRunId, 
+					"gapi", 
+					"authenticate", 
+					[scope], 
+					stackRunId, // Use this stack run as the parent
+					parentTaskRunId // Pass through the original parent task run ID
+				);
+				
+				hostLog(logPrefix, "info", `[VM] Stack run ${nestedStackRunId} created for gapi.authenticate`);
+				
+				// Create a suspension marker as a plain object
+				const suspensionMarkerObj = vm!.newObject();
+				const trueHandle = vm!.true;
+				const stackRunIdHandle = vm!.newString(nestedStackRunId);
+				const serviceNameHandle = vm!.newString("gapi");
+				const methodNameHandle = vm!.newString("authenticate");
+				
+				// Set properties on the object
+				vm!.setProp(suspensionMarkerObj, "__hostCallSuspended", trueHandle);
+				vm!.setProp(suspensionMarkerObj, "stackRunId", stackRunIdHandle);
+				vm!.setProp(suspensionMarkerObj, "serviceName", serviceNameHandle);
+				vm!.setProp(suspensionMarkerObj, "methodName", methodNameHandle);
+				
+				// Clean up temporary handles
+				stackRunIdHandle.dispose();
+				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				return suspensionMarkerObj;
+			} catch (e: unknown) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				hostLog(logPrefix, "error", `[VM] Error in gapi.authenticate: ${errorMessage}`);
+				throw new Error(`Internal error in gapi.authenticate: ${errorMessage}`);
+			}
+		}));
+		
+		// Set up the object hierarchy
+		vm.setProp(domainsObj, "list", listMethod);
+		listMethod.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(directoryObj, "domains", domainsObj);
+		domainsObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(adminObj, "directory", directoryObj);
+		directoryObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(gapiObj, "admin", adminObj);
+		adminObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(gapiObj, "authenticate", authenticateMethod);
+		authenticateMethod.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(toolsObj, "gapi", gapiObj);
+		gapiObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(vm.global, "tools", toolsObj);
+		toolsObj.dispose(); // Safe to dispose after setProp
+		
+		// Evaluate the task code
+		hostLog(logPrefix, "info", "Evaluating task code");
+		const evalResult = vm.evalCode(wrapTaskCode(taskCode));
+		
+		if (evalResult.error) {
+			throw new Error(`Error evaluating task code: ${vm.dump(evalResult.error)}`);
+		}
+		
+		evalResult.value.dispose();
+		
+		// Get the exported function
+		const exports = vm.getProp(moduleObj, "exports");
+		
+		// Check if exports is a function
+		if (vm.typeof(exports) !== 'function') {
+			throw new Error("Module exports is not a function");
+		}
+		
+		// Convert task input to VM value
+		const handles: QuickJSHandle[] = [];
+		const inputHandle = createHandleFromJson(vm, taskInput, handles);
+		
+		// Create context object with tools
+		const contextObj = trackHandle(vm.newObject());
+		const toolsContextHandle = vm.getProp(vm.global, "tools");
+		vm.setProp(contextObj, "tools", toolsContextHandle);
+		
+		// Call the task function
+		hostLog(logPrefix, "info", `Calling task function with input: ${JSON.stringify(taskInput)}`);
+		const resultHandle = vm.callFunction(exports, vm.undefined, inputHandle, contextObj);
+
+		// Handle promise result if it's a promise
+		let taskResult: any;
+		
+		if (resultHandle.error) {
+			// Better error extraction
+			try {
+				const errorObj = vm.dump(resultHandle.error);
+				const errorMessage = typeof errorObj === 'object' && errorObj.message ? 
+					errorObj.message : 
+					typeof errorObj === 'string' ? 
+						errorObj : 
+						'Unknown error';
+				
+				hostLog(logPrefix, "error", `Error calling task function: ${errorMessage}`);
+				throw new Error(`Error in task execution: ${errorMessage}`);
+			} catch (dumpError: unknown) {
+				// Fallback if we can't dump the error
+				hostLog(logPrefix, "error", `Error calling task function (dump failed): ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
+				throw new Error(`Error in task execution (dump failed): ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
+			}
+		}
+		
+		const valueType = vm.typeof(resultHandle.value);
+		hostLog(logPrefix, "info", `Extracting result of type: ${valueType}`);
+		
+		// Simple approach - just dump the value directly
+		try {
+			// Direct extraction
+			taskResult = vm.dump(resultHandle.value);
+			hostLog(logPrefix, "debug", `Raw task result: ${JSON.stringify(taskResult)}`);
+			
+			// Clean up handles
+			resultHandle.value.dispose();
+			handles.forEach(h => h.dispose());
+			exports.dispose();
+			
+			if (taskRunId) {
+				// Update stack run record with result
+				const supabaseClient = createClient(SUPABASE_URL!, SUPABASE_SERVICE_KEY!);
+				await supabaseClient.from('stack_runs').update({
+				status: 'completed',
+					result: taskResult,
+					updated_at: new Date().toISOString()
+			}).eq('id', taskRunId);
+		}
+
+			return taskResult;
+		} catch (error: unknown) {
+			hostLog(logPrefix, "error", `Error extracting result: ${error instanceof Error ? error.message : String(error)}`);
+			throw new Error(`Error extracting result: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	} catch (error) {
+		hostLog(logPrefix, 'error', "Unhandled error during QuickJS task execution:", error, error.stack);
+		if (taskRunId) {
+			try {
+				await supabaseClient.from('task_runs').update({
+					status: 'failed',
+					error: { message: error.message, stack: error.stack },
+					updated_at: new Date().toISOString(),
+					ended_at: new Date().toISOString()
+				}).eq('id', taskRunId);
+			} catch (dbError) {
+				hostLog(logPrefix, 'error', "Additionally, failed to update task_run with error state:", dbError);
+			}
+		}
+		return new Response(simpleStringify({ error: error.message, stack: error.stack }), {
+			status: 500,
+			headers: { ...corsHeaders, "Content-Type": "application/json" }
+		});
+	} finally {
+		if (vm) {
+			vm.dispose();
+			hostLog(logPrefix, 'info', "VM disposed.");
+		}
+		if (rt) {
+			rt.dispose();
+			hostLog(logPrefix, 'info', "Runtime disposed.");
+		}
+		hostLog(logPrefix, 'info', "QuickJS processing finished.");
+	}
+}
+
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+serve(serveQuickJsFunction);
+
+/*
+ Placeholder for saveEphemeralCallFn - REMOVED
+ const saveEphemeralCallFn = async (...) => { ... };
+*/
+
+// Remove vm-state-manager import if not used for serialization/deserialization directly here
+// import { saveVMState } from "./vm-state-manager.ts"; 
+
+// --- VM Proxy Builder ---
+function buildVmProxy(
+	ctx: QuickJSAsyncContext,
+	toolName: string,
+	hostProxy: any, 
+	callHostToolHandle: QuickJSHandle, 
+	parentStackRunId: string | null, 
+	handles: QuickJSHandle[] 
+): QuickJSHandle {
+	hostLog("debug", `[VM Proxy Builder] Building proxy for tool: ${toolName}`);
+
+	const proxyTarget = ctx.newObject(); // The object VM code interacts with
+	handles.push(proxyTarget);
+
+	// Store handles needed inside the proxy trap closures
+	const toolNameHandle = ctx.newString(toolName); handles.push(toolNameHandle);
+	const parentStackRunIdHandle = parentStackRunId ? ctx.newString(parentStackRunId) : ctx.null;
+	if(parentStackRunId) handles.push(parentStackRunIdHandle); // Only track if not null
+
+	// Use QuickJS Proxy to intercept property access and calls
+	const handler = ctx.newObject(); handles.push(handler);
+
+	// Trap for property access (e.g., tools.openai.chat)
+	const getTrap = ctx.newFunction("get", (targetHandle: QuickJSHandle, propNameHandle: QuickJSHandle /* , receiverHandle */) => {
+		const propName = ctx.getString(propNameHandle);
+		hostLog("debug", `[VM Proxy Trap] GET trap: ${toolName}.${propName}`);
+
+		// Check if the property exists on the *host* proxy to decide if it's a callable method or another object level
+		// This is a simplified check; a real implementation might need more robust introspection
+		let currentHostProp = hostProxy;
+		const chain = [propName]; // Start building the potential chain
+		try {
+			currentHostProp = currentHostProp[propName];
+		} catch { currentHostProp = undefined; }
+
+
+		if (typeof currentHostProp === 'function') {
+			// If it's a function on the host, return a VM function that triggers the host call
+			const vmFunction = ctx.newFunction(propName, (...argHandles: QuickJSHandle[]) => {
+				hostLog("debug", `[VM Proxy Trap] CALL trap invoked for: ${toolName}.${propName}`);
+				const argsArrayHandle = ctx.newArray();
+				argHandles.forEach((argHandle, index) => {
+					// Use setProp with index instead of pushValue
+					ctx.setProp(argsArrayHandle, index, argHandle);
+				});
+				handles.push(argsArrayHandle); 
+
+				// Convert args to real JS values for saving to stack_runs table
+				const args = ctx.dump(argsArrayHandle);
+				
+				// Generate a unique ID for this stack run
+				const stackRunId = _generateUUID();
+				
+				// Call the __saveEphemeralCall__ function to save the call to the stack_runs table
+				const saveEphemeralCallHandle = ctx.getProp(ctx.global, "__saveEphemeralCall__");
+				const serviceNameHandle = ctx.newString(toolName);
+				const methodNameHandle = ctx.newString(propName);
+				
+				// Create promise to save call and get result
+				const savePromiseHandle = ctx.callFunction(
+					saveEphemeralCallHandle,
+					ctx.undefined,
+					serviceNameHandle,
+					methodNameHandle,
+					argsArrayHandle,
+					parentStackRunIdHandle
+				);
+				
+				// Clean up temporary handles
+				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				// Return the promise from __saveEphemeralCall__
+				return savePromiseHandle;
+			});
+			handles.push(vmFunction);
+			return vmFunction;
+		} else if (typeof currentHostProp === 'object' && currentHostProp !== null) {
+			// If it's an object, recursively build another proxy level
+			// TODO: Implement recursive proxy building if needed (e.g., tools.openai.chat.completions)
+			// For now, return undefined for deeper levels
+			 hostLog("warn", `[VM Proxy Trap] GET for non-function property ${toolName}.${propName}. Returning undefined (recursion not implemented).`);
+			return ctx.undefined;
+		} else {
+			// Property doesn't exist or is not a function/object
+			hostLog("warn", `[VM Proxy Trap] Property '${propName}' not found or invalid type on host proxy for '${toolName}'. Returning undefined.`);
+			return ctx.undefined;
+		}
+	});
+	handles.push(getTrap);
+	ctx.setProp(handler, "get", getTrap);
+
+	// TODO: Add 'set' trap if needed, usually not for tool proxies
+
+	// --- Create Proxy using evalCode --- 
+	// We need to expose the target and handler to the evalCode scope
+	const tempGlobalPropTarget = `__proxyTarget_${toolName}`;
+	const tempGlobalPropHandler = `__proxyHandler_${toolName}`;
+	ctx.setProp(ctx.global, tempGlobalPropTarget, proxyTarget);
+	ctx.setProp(ctx.global, tempGlobalPropHandler, handler);
+
+	const evalResult = ctx.evalCode(`new Proxy(${tempGlobalPropTarget}, ${tempGlobalPropHandler})`);
+
+	// Clean up temporary globals immediately
+	ctx.setProp(ctx.global, tempGlobalPropTarget, ctx.undefined); // Or delete if possible/safe
+	ctx.setProp(ctx.global, tempGlobalPropHandler, ctx.undefined);
+
+	if (evalResult.error) {
+		hostLog("error", `[VM Proxy Builder] Error creating proxy for ${toolName} via evalCode`, ctx.dump(evalResult.error));
+		evalResult.error.dispose();
+		// Return the original target as a fallback? Or throw?
+		// Throwing might be better to indicate failure.
+		throw new Error(`Failed to create VM proxy for tool ${toolName}`);
+	}
+
+	// --- End Proxy Creation ---
+
+	// The result of evalCode is the proxy handle
+	const proxyHandle = evalResult.value;
+	handles.push(proxyHandle); // Track the proxy handle itself
+
+	hostLog("debug", `[VM Proxy Builder] Finished building proxy for ${toolName}`);
+	return proxyHandle;
+}
+
+// --- Implementation of __saveEphemeralCall__ for the VM ---
+const saveEphemeralCallFn = async (
+	ctx: QuickJSAsyncContext,
+	_thisHandle: QuickJSHandle,
+	serviceNameHandle: QuickJSHandle,
+	methodNameHandle: QuickJSHandle, 
+	argsHandle: QuickJSHandle,
+	parentStackRunIdHandle: QuickJSHandle
+): Promise<QuickJSHandle> => {
+	const serviceName = ctx.getString(serviceNameHandle);
+	const methodName = ctx.getString(methodNameHandle);
+	const args = ctx.dump(argsHandle);
+	const parentStackRunId = parentStackRunIdHandle !== ctx.null ? ctx.getString(parentStackRunIdHandle) : null;
+	
+	// Generate a unique ID for this stack run
+	const stackRunId = _generateUUID();
+	
+	hostLog("info", `[saveEphemeralCall] Creating stack run for ${serviceName}.${methodName} with ID ${stackRunId}`, {});
+	
+	// Capture the current VM state
+	try {
+		// Initialize Supabase client
+		const supabaseClient = createClient(SUPABASE_URL!, SUPABASE_SERVICE_KEY!);
+		
+		// Save to stack_runs table
+		const { data, error } = await supabaseClient
+			.from('stack_runs')
+			.insert({
+				id: stackRunId,
+				parent_task_run_id: parentStackRunId,
+				module_name: serviceName,
+				method_name: methodName,
+				args: args,
+				status: 'pending',
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString()
+			})
+			.select('id');
+		
+		if (error) {
+			throw new Error(`Failed to create stack run: ${error.message}`);
+		}
+		
+		// Try to trigger the stack processor
+		try {
+			const response = await fetch(`${SUPABASE_URL}/functions/v1/stack-processor`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
+				},
+				body: JSON.stringify({ stack_run_id: stackRunId })
+			});
+			
+			if (!response.ok) {
+				console.error(`[saveEphemeralCall] Failed to trigger stack processor: ${await response.text()}`);
+			}
+		} catch (e) {
+			console.error(`[saveEphemeralCall] Error triggering stack processor: ${e}`);
+		}
+		
+		// Poll for stack run completion
+		let result;
+		let pollCount = 0;
+		const maxPolls = 30;
+		const pollInterval = 500; // ms
+		
+		while (pollCount < maxPolls) {
+			pollCount++;
+			
+			// Wait for next poll
+			await new Promise(resolve => setTimeout(resolve, pollInterval));
+			
+			// Check stack run status
+			const { data: stackRun, error: pollError } = await supabaseClient
+				.from('stack_runs')
+				.select('*')
+				.eq('id', stackRunId)
+				.single();
+			
+			if (pollError) {
+				console.error(`[saveEphemeralCall] Error polling stack run: ${pollError.message}`);
 				continue;
 			}
-			const vmProxyHandle = vmProxyResult.value;
-			handles.push(vmProxyHandle);
-			ctx.setProp(toolsHandle, serviceName, vmProxyHandle);
-			// console.log("debug", "host", `VM proxy created for ${serviceName}.`);
-		}
-		vmProxyGeneratorHandle.dispose();
-		// console.log("debug", "host", "Finished populating VM 'tools' object.");
-
-
-		// Module Loader / Require Setup - Reduced verbosity
-		// console.log("debug", "host", "Setting up module loader..."); // REMOVED
-		const requireGeneratorFuncStr = `
-			function() { // Define as a function to be called later
-				const moduleCache = {};
-				const injectedModules = __injectedModules__; // Assume this is globally available
-
-				function require(id) {
-					const resolvedId = id.startsWith('./') ? id.substring(2) : id;
-					if (resolvedId !== 'tasks') {
-						// Log error directly
-						console.error('[VM require] Attempted to require unexpected module:', resolvedId);
-						throw new Error("Only the tasks module can be required currently. Got: " + resolvedId);
-					}
-
-					if (moduleCache[resolvedId]) return moduleCache[resolvedId];
-
-					const moduleCode = injectedModules[resolvedId];
-					if (!moduleCode) {
-						 // Log error directly
-						 console.error('[VM require] Module not found:', resolvedId);
-						 throw new Error('Module not found: ' + resolvedId);
-					}
-
-					const module = { exports: {} };
-					// Use Function constructor - seems necessary for module scope
-					const moduleWrapper = new Function('module', 'exports', 'require', moduleCode);
-					moduleWrapper(module, module.exports, require);
-
-					moduleCache[resolvedId] = module.exports;
-					return module.exports;
-				}
-				// This inner function is what we want to return and assign to global require
-				return require;
+			
+			if (stackRun.status === 'completed') {
+				result = stackRun.result;
+				break;
+			} else if (stackRun.status === 'failed') {
+				throw new Error(`Stack run failed: ${JSON.stringify(stackRun.error)}`);
 			}
-		`;
-
-		// --- OPTIMIZATION: Use NoTrack version for potentially faster module injection ---
-		const modulesHandle = createHandleFromJsonNoTrack(ctx, modules, handles);
-		ctx.setProp(ctx.global, "__injectedModules__", modulesHandle);
-
-		// console.log("debug", "host", "Evaluating require generator..."); // REMOVED
-		const requireGeneratorEvalResult = ctx.evalCode(`(${requireGeneratorFuncStr})`);
-		if (requireGeneratorEvalResult.error) {
-			handles.push(requireGeneratorEvalResult.error);
-			const errDump = ctx.dump(requireGeneratorEvalResult.error);
-			console.log("error", "host", "Failed to evaluate require generator function code", [errDump]);
-			throw new Error("Failed to evaluate require generator");
+			
+			// Continue polling
+			console.log(`[saveEphemeralCall] Polling stack run ${stackRunId}, status: ${stackRun.status}, poll ${pollCount}/${maxPolls}`);
 		}
-		const requireGeneratorHandle = requireGeneratorEvalResult.value;
-		handles.push(requireGeneratorHandle);
-
-		// console.log("debug", "host", "Calling require generator..."); // REMOVED
-		const requireCallResult = ctx.callFunction(requireGeneratorHandle, ctx.global);
-		if (requireCallResult.error) {
-			handles.push(requireCallResult.error as QuickJSHandle);
-			const errDump = ctx.dump(requireCallResult.error as QuickJSHandle);
-			console.log("error", "host", "Failed to call require generator function", [errDump]);
-			throw new Error("Failed to call require generator function");
+		
+		if (pollCount >= maxPolls) {
+			throw new Error(`Polling timeout for stack run ${stackRunId}`);
 		}
-		const requireHandle = requireCallResult.value as QuickJSHandle;
-		handles.push(requireHandle);
+		
+		// Return the result
+		return createHandleFromJsonNoTrack(ctx, result);
+	} catch (error) {
+		hostLog("error", `[saveEphemeralCall] Error: ${error instanceof Error ? error.message : String(error)}`, {});
+		
+		// Create error handle
+		const errorHandle = ctx.newError(error instanceof Error ? error.message : String(error));
+		const promise = ctx.newPromise();
+		promise.reject(errorHandle);
+		errorHandle.dispose();
+		
+		return promise.handle;
+	}
+};
 
-		ctx.setProp(ctx.global, "require", requireHandle);
-		// console.log("debug", "host", "Global injections complete."); // REMOVED
-
-		// --- Execute Task Code ---
-		//console.log("info", "host", "Executing user code...");
-		// Wrapped code remains the same - VM logs within it are now mostly console.log only
-		const wrappedCode = `
-(async () => {
-  try {
-    let taskFunction;
-    const module = { exports: undefined };
-    {
-      ${code}
-    }
-    if (typeof module.exports === 'function') {
-      // Log VM execution start directly - Remove for less noise
-      // console.log('[VM] Task function found. Executing...');
-      // Pass input AND context object { tools, require, module } as second argument
-      const resultPromiseOrValue = module.exports(
-          globalThis.__input__ || {},
-          { 
-              tools: globalThis.tools, 
-              require: globalThis.require, 
-              module: globalThis.module, 
-              // Add other context if needed
-          }
-      );
-      if (resultPromiseOrValue && typeof resultPromiseOrValue.then === 'function') {
-        // console.log('[VM] Task returned a Promise. Awaiting...'); // REMOVED
-        const finalResult = await resultPromiseOrValue;
-        // console.log('[VM] Task Promise resolved. Assigning to __result__.'); // REMOVED
-        globalThis.__result__ = finalResult;
-    } else {
-        // console.log('[VM] Task returned non-Promise. Assigning to __result__.'); // REMOVED
-        globalThis.__result__ = resultPromiseOrValue;
-    }
-    } else {
-      // console.log('[VM] module.exports not a function. Assigning to __result__.'); // REMOVED
-      globalThis.__result__ = module.exports;
-    }
-    // console.log('[VM] Wrapper execution finished.'); // REMOVED
-  } catch (err) {
-    // Log VM error directly
-    console.error('[VM] Task execution error:', err instanceof Error ? err.message : String(err), err instanceof Error ? err.stack : '');
-    globalThis.__execution_error__ = {
-        message: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined
-    };
-  }
-})();
-`;
-		//console.log("debug", "host", "Evaluating user code ASYNCHRONOUSLY...");
-
-		const evalPromise = ctx.evalCodeAsync(wrappedCode, "task.js");
-
-		// --- Wait for initial evaluation and process all subsequent jobs/timers ---
-		// console.log("debug", "host", "Waiting for initial evaluation promise..."); // REMOVED
-		let evalResult = await evalPromise;
-
-		//console.log("info", "host", "Initial promise settled. Processing remaining jobs/timers (timeout: ${executionTimeoutSeconds}s)...");
-		const safetyBreakMax = executionTimeoutSeconds * 100; // Approx counter limit based on 10ms yields
-		let safetyBreak = safetyBreakMax;
-		let jobLoopErrorHandle: QuickJSHandle | null = null;
-
+// Handle direct task execution
+async function executeTaskDirect(taskCode: string, taskName: string, taskInput: any, stackRunId?: string, parentRunId?: string): Promise<any> {
+	const logPrefix = `[executeTaskDirect:${taskName}]`;
+	hostLog(logPrefix, "info", `Direct task execution for ${taskName}`);
+	
+	let vm: QuickJSAsyncContext | null = null;
+	let quickjs = null;
+	let runtime = null;
+	let activeHandles: QuickJSHandle[] = [];
+	
+	try {
+		// Initialize QuickJS
+		quickjs = await getQuickJS();
+		runtime = quickjs.newRuntime();
+		// Fix type issues by casting
+		vm = await newAsyncContext(runtime as unknown as any);
+		
+		// Track all active handles for cleanup
+		const trackHandle = (handle: QuickJSHandle): QuickJSHandle => {
+			if (handle && handle.alive) {
+				activeHandles.push(handle);
+			}
+			return handle;
+		};
+		
+		// These will be used by ephemeral calls
+		const parentStackRunId = parentRunId || null;
+		const parentTaskRunId = parentRunId || null;
+		
+		// Get Supabase URL and key from environment 
+		const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+		const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+		
+		if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+			throw new Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables are required");
+		}
+		
+		// Set up global objects
+		const consoleObj = trackHandle(vm.newObject());
+		
+		// Add console methods
+		for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+			const logFn = trackHandle(vm.newFunction(level, (...args: QuickJSHandle[]) => {
+				try {
+					const stringArgs = args.map(arg => {
+						try {
+							return vm!.typeof(arg) === 'string' 
+								? vm!.getString(arg) 
+								: JSON.stringify(vm!.dump(arg));
+						} catch (e) {
+							return "[Complex Object]";
+						}
+					});
+					hostLog(logPrefix, level as LogEntry["level"], `[VM] ${stringArgs.join(' ')}`);
+				} catch (e) {
+					hostLog(logPrefix, "error", `[VM Console] Error logging: ${e instanceof Error ? e.message : String(e)}`);
+				}
+			}));
+			vm.setProp(consoleObj, level, logFn);
+			logFn.dispose(); // Safe to dispose after setProp
+			activeHandles = activeHandles.filter(h => h !== logFn);
+		}
+		
+		vm.setProp(vm.global, "console", consoleObj);
+		consoleObj.dispose(); // Safe to dispose after setProp
+		activeHandles = activeHandles.filter(h => h !== consoleObj);
+		
+		// Set up module export
+		const moduleObj = trackHandle(vm.newObject());
+		const exportsObj = trackHandle(vm.newObject());
+		vm.setProp(moduleObj, "exports", exportsObj);
+		vm.setProp(vm.global, "module", moduleObj);
+		
+		// Create empty tools object with task execution capability
+		const toolsObj = trackHandle(vm.newObject());
+		
+		// Add tasks object with execute method
+		const tasksObj = trackHandle(vm.newObject());
+		const executeMethod = trackHandle(vm.newAsyncifiedFunction("execute", async (taskNameHandle: QuickJSHandle, inputHandle: QuickJSHandle) => {
+			// Always dispose handles created by methods within other methods
+			try {
+				const nestedTaskName = vm!.getString(taskNameHandle);
+				const nestedInput = vm!.dump(inputHandle);
+				
+				hostLog(logPrefix, "info", `[VM] Called tasks.execute('${nestedTaskName}')`);
+				
+				// Generate a unique ID for the nested task call
+				const nestedStackRunId = _generateUUID();
+				
+				// Save the ephemeral call to the database
+				await saveStackRun(
+					nestedStackRunId,
+					"tasks", 
+					"execute", 
+					[nestedTaskName, nestedInput], 
+					stackRunId, // Use this stack run as the parent
+					parentTaskRunId // Pass through the original parent task run ID
+				);
+				
+				hostLog(logPrefix, "info", `[VM] Stack run ${nestedStackRunId} created for nested task ${nestedTaskName}`);
+				
+				// Create a suspension marker as a plain object
+				const suspensionMarkerObj = vm!.newObject();
+				const trueHandle = vm!.true;
+				const stackRunIdHandle = vm!.newString(nestedStackRunId);
+				const serviceNameHandle = vm!.newString("tasks");
+				const methodNameHandle = vm!.newString("execute");
+				
+				// Set properties on the object
+				vm!.setProp(suspensionMarkerObj, "__hostCallSuspended", trueHandle);
+				vm!.setProp(suspensionMarkerObj, "stackRunId", stackRunIdHandle);
+				vm!.setProp(suspensionMarkerObj, "serviceName", serviceNameHandle);
+				vm!.setProp(suspensionMarkerObj, "methodName", methodNameHandle);
+				
+				// Clean up temporary handles
+				stackRunIdHandle.dispose();
+				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				return suspensionMarkerObj;
+			} catch (e: unknown) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				hostLog(logPrefix, "error", `[VM] Error in tasks.execute: ${errorMessage}`);
+				throw new Error(`Internal error in tasks.execute: ${errorMessage}`);
+			}
+		}));
+		
+		vm.setProp(tasksObj, "execute", executeMethod);
+		executeMethod.dispose(); // Safe to dispose after setProp
+		activeHandles = activeHandles.filter(h => h !== executeMethod);
+		
+		vm.setProp(toolsObj, "tasks", tasksObj);
+		tasksObj.dispose(); // Safe to dispose after setProp
+		activeHandles = activeHandles.filter(h => h !== tasksObj);
+		
+		// Add basic gapi object with admin.directory.domains functionality
+		const gapiObj = trackHandle(vm.newObject());
+		const adminObj = trackHandle(vm.newObject());
+		const directoryObj = trackHandle(vm.newObject());
+		const domainsObj = trackHandle(vm.newObject());
+		
+		// Create a simple list method for domains
+		const listMethod = trackHandle(vm.newAsyncifiedFunction("list", async (optionsHandle: QuickJSHandle) => {
+			try {
+				const options = vm!.dump(optionsHandle);
+				hostLog(logPrefix, "info", `[VM] Called gapi.admin.directory.domains.list with options: ${JSON.stringify(options)}`);
+				
+				// Generate a unique ID for this stack run
+				const nestedStackRunId = _generateUUID();
+				
+				// Save the ephemeral call to the database
+				await saveStackRun(
+					nestedStackRunId, 
+					"gapi", 
+					"admin.directory.domains.list", 
+					[options], 
+					stackRunId, // Use this stack run as the parent
+					parentTaskRunId // Pass through the original parent task run ID
+				);
+				
+				hostLog(logPrefix, "info", `[VM] Stack run ${nestedStackRunId} created for gapi.admin.directory.domains.list`);
+				
+				// Create a suspension marker as a plain object
+				const suspensionMarkerObj = vm!.newObject();
+				const trueHandle = vm!.true;
+				const stackRunIdHandle = vm!.newString(nestedStackRunId);
+				const serviceNameHandle = vm!.newString("gapi");
+				const methodNameHandle = vm!.newString("admin.directory.domains.list");
+				
+				// Set properties on the object
+				vm!.setProp(suspensionMarkerObj, "__hostCallSuspended", trueHandle);
+				vm!.setProp(suspensionMarkerObj, "stackRunId", stackRunIdHandle);
+				vm!.setProp(suspensionMarkerObj, "serviceName", serviceNameHandle);
+				vm!.setProp(suspensionMarkerObj, "methodName", methodNameHandle);
+				
+				// Clean up temporary handles
+				stackRunIdHandle.dispose();
+				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				return suspensionMarkerObj;
+			} catch (e: unknown) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				hostLog(logPrefix, "error", `[VM] Error in gapi.admin.directory.domains.list: ${errorMessage}`);
+				throw new Error(`Internal error in gapi.admin.directory.domains.list: ${errorMessage}`);
+			}
+		}));
+		
+		// Create authenticate method with improved error handling
+		const authenticateMethod = trackHandle(vm.newAsyncifiedFunction("authenticate", async (scopeHandle: QuickJSHandle) => {
+			try {
+				const scope = vm!.getString(scopeHandle);
+				hostLog(logPrefix, "info", `[VM] Called gapi.authenticate with scope: ${scope}`);
+				
+				// Generate a unique ID for this stack run
+				const nestedStackRunId = _generateUUID();
+				
+				// Save the ephemeral call to the database
+				await saveStackRun(
+					nestedStackRunId, 
+					"gapi", 
+					"authenticate", 
+					[scope], 
+					stackRunId, // Use this stack run as the parent
+					parentTaskRunId // Pass through the original parent task run ID
+				);
+				
+				hostLog(logPrefix, "info", `[VM] Stack run ${nestedStackRunId} created for gapi.authenticate`);
+				
+				// Create a suspension marker as a plain object
+				const suspensionMarkerObj = vm!.newObject();
+				const trueHandle = vm!.true;
+				const stackRunIdHandle = vm!.newString(nestedStackRunId);
+				const serviceNameHandle = vm!.newString("gapi");
+				const methodNameHandle = vm!.newString("authenticate");
+				
+				// Set properties on the object
+				vm!.setProp(suspensionMarkerObj, "__hostCallSuspended", trueHandle);
+				vm!.setProp(suspensionMarkerObj, "stackRunId", stackRunIdHandle);
+				vm!.setProp(suspensionMarkerObj, "serviceName", serviceNameHandle);
+				vm!.setProp(suspensionMarkerObj, "methodName", methodNameHandle);
+				
+				// Clean up temporary handles
+				stackRunIdHandle.dispose();
+				serviceNameHandle.dispose();
+				methodNameHandle.dispose();
+				
+				return suspensionMarkerObj;
+			} catch (e: unknown) {
+				const errorMessage = e instanceof Error ? e.message : String(e);
+				hostLog(logPrefix, "error", `[VM] Error in gapi.authenticate: ${errorMessage}`);
+				throw new Error(`Internal error in gapi.authenticate: ${errorMessage}`);
+			}
+		}));
+		
+		// Set up the object hierarchy
+		vm.setProp(domainsObj, "list", listMethod);
+		listMethod.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(directoryObj, "domains", domainsObj);
+		domainsObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(adminObj, "directory", directoryObj);
+		directoryObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(gapiObj, "admin", adminObj);
+		adminObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(gapiObj, "authenticate", authenticateMethod);
+		authenticateMethod.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(toolsObj, "gapi", gapiObj);
+		gapiObj.dispose(); // Safe to dispose after setProp
+		
+		vm.setProp(vm.global, "tools", toolsObj);
+		toolsObj.dispose(); // Safe to dispose after setProp
+		
+		// Evaluate the task code
+		hostLog(logPrefix, "info", "Evaluating task code");
+		const evalResult = vm.evalCode(wrapTaskCode(taskCode));
+		
+		if (evalResult.error) {
+			throw new Error(`Error evaluating task code: ${vm.dump(evalResult.error)}`);
+		}
+		
+		evalResult.value.dispose();
+		
+		// Get the exported function
+		const exports = vm.getProp(moduleObj, "exports");
+		
+		// Check if exports is a function
+		if (vm.typeof(exports) !== 'function') {
+			throw new Error("Module exports is not a function");
+		}
+		
+		// Convert task input to VM value
+		const handles: QuickJSHandle[] = [];
+		const inputHandle = createHandleFromJson(vm, taskInput, handles);
+		
+		// Create context object with tools
+		const contextObj = trackHandle(vm.newObject());
+		const toolsContextHandle = vm.getProp(vm.global, "tools");
+		vm.setProp(contextObj, "tools", toolsContextHandle);
+		
+		// Call the task function
+		hostLog(logPrefix, "info", `Calling task function with input: ${JSON.stringify(taskInput)}`);
+		const resultHandle = vm.callFunction(exports, vm.undefined, inputHandle, contextObj);
+		
+		if (resultHandle.error) {
+			// Better error extraction
+			try {
+				const errorObj = vm.dump(resultHandle.error);
+				const errorMessage = typeof errorObj === 'object' && errorObj.message ? 
+					errorObj.message : 
+					typeof errorObj === 'string' ? 
+						errorObj : 
+						'Unknown error';
+				
+				hostLog(logPrefix, "error", `Error calling task function: ${errorMessage}`);
+				throw new Error(`Error in task execution: ${errorMessage}`);
+			} catch (dumpError: unknown) {
+				// Fallback if we can't dump the error
+				hostLog(logPrefix, "error", `Error calling task function (dump failed): ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
+				throw new Error(`Error in task execution (dump failed): ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
+			}
+		}
+		
+		const valueType = vm.typeof(resultHandle.value);
+		hostLog(logPrefix, "info", `Extracting result of type: ${valueType}`);
+		
+		// Handle Promise results
+		if (valueType === 'object') {
+			try {
+				// Check if it's likely a Promise (QuickJS promises are objects with then/catch methods)
+				const isThenMethodPresent = vm.evalCode(`
+					(function() { 
+						const result = globalThis.__checkResult;
+						return result && typeof result.then === 'function'; 
+					})()
+				`);
+				
+				// Set the result handle on global scope for the check
+				vm.setProp(vm.global, "__checkResult", resultHandle.value);
+				
+				if (!isThenMethodPresent.error && vm.typeof(isThenMethodPresent.value) === 'boolean' && vm.dump(isThenMethodPresent.value) === true) {
+					hostLog(logPrefix, "info", "Result is a Promise, awaiting resolution");
+					
+					// Set up promise handlers using a new promise in the VM
+					const resultPromise = vm.newPromise();
+					
+					// Add then/catch handlers to the returned promise
+					const thenFn = vm.newFunction("then", (valueHandle) => {
+						resultPromise.resolve(valueHandle);
+						return vm.undefined;
+					});
+					
+					const catchFn = vm.newFunction("catch", (errorHandle) => {
+						resultPromise.reject(errorHandle);
+						return vm.undefined;
+					});
+					
+					// Set the handlers in global scope for the evalCode to use
+					vm.setProp(vm.global, "__thenFn", thenFn);
+					vm.setProp(vm.global, "__catchFn", catchFn);
+					
+					// Call the then and catch methods on the result using evalCode
+					const callThenResult = vm.evalCode(`
+						globalThis.__checkResult.then(globalThis.__thenFn).catch(globalThis.__catchFn);
+					`);
+					
+					if (callThenResult.error) {
+						throw new Error(`Error setting up promise handlers: ${vm.dump(callThenResult.error)}`);
+					}
+					
+					// Now process pending jobs until our promise settles or we timeout
+					let attempts = 0;
+					const MAX_ATTEMPTS = 1000;
+					let promiseSettled = false;
+					let finalResult: any;
+					let error: any;
+					
+					// Set up the promise resolution callbacks
+					resultPromise.settled.then((settled) => {
+						promiseSettled = true;
+						if (settled.fulfilled) {
+							finalResult = vm.dump(settled.value);
+						} else {
+							error = vm.dump(settled.reason);
+						}
+					});
+					
+					// Process pending jobs until the promise settles
+					while (!promiseSettled && attempts < MAX_ATTEMPTS) {
+						attempts++;
+						
+						// Execute pending jobs in the runtime
+						const jobResult = runtime.executePendingJobs();
+						
+						if (jobResult.error) {
+							throw new Error(`Error executing pending jobs: ${jobResult.error}`);
+						}
+						
+						// Give a short timeout to allow promise callbacks to execute
+						if (attempts % 10 === 0) {
+							await new Promise(resolve => setTimeout(resolve, 1));
+						}
+					}
+					
+					// Clean up the global references
+					vm.setProp(vm.global, "__checkResult", vm.undefined);
+					vm.setProp(vm.global, "__thenFn", vm.undefined);
+					vm.setProp(vm.global, "__catchFn", vm.undefined);
+					
+					// Dispose the function handles
+					thenFn.dispose();
+					catchFn.dispose();
+					
+					if (!promiseSettled) {
+						throw new Error(`Promise did not settle after ${MAX_ATTEMPTS} job processing attempts`);
+					}
+					
+					if (error) {
+						throw new Error(`Promise rejected: ${typeof error === 'object' && error.message ? error.message : String(error)}`);
+					}
+					
+					// Return the final result
+					hostLog(logPrefix, "info", "Promise resolved successfully");
+					
+					// Clean up handles
+					resultHandle.value.dispose();
+					handles.forEach(h => {
+						try {
+							if (h.alive) h.dispose();
+						} catch (e) {
+							// Ignore errors in cleanup
+							hostLog(logPrefix, "warn", `Error disposing handle: ${e}`);
+						}
+					});
+					
+					exports.dispose();
+					contextObj.dispose();
+					
+					// Update stack run record with result
+					if (stackRunId) {
+						// Update stack run record with result
+						const supabaseClient = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+						try {
+							await supabaseClient.from('stack_runs').update({
+								status: 'completed',
+								result: finalResult,
+								updated_at: new Date().toISOString()
+							}).eq('id', stackRunId);
+						} catch (dbError) {
+							hostLog(logPrefix, "error", `Database error updating stack run: ${dbError}`);
+							// Continue even with database error
+						}
+					}
+					
+					return finalResult;
+				}
+			} catch (promiseError: unknown) {
+				hostLog(logPrefix, "error", `Error handling promise: ${promiseError instanceof Error ? promiseError.message : String(promiseError)}`);
+				throw new Error(`Error handling promise: ${promiseError instanceof Error ? promiseError.message : String(promiseError)}`);
+			}
+		}
+		
+		// If not a promise, just extract the value directly
 		try {
-			while (rt?.alive && safetyBreak > 0) {
-				safetyBreak--;
-				let jobsProcessed = 0;
-				do {
-					 const jobsResult = rt.executePendingJobs();
-					 if (jobsResult.error) {
-						 const errorDump = ctx.dump(jobsResult.error);
-						 console.log("error", "host", "Error during executePendingJobs:", [errorDump]);
-						 jobLoopErrorHandle = jobsResult.error;
-						 executionError = `QuickJS job execution error: ${simpleStringify(errorDump)}`;
-					break;
+			// Direct extraction
+			let taskResult = vm.dump(resultHandle.value);
+			hostLog(logPrefix, "debug", `Raw task result: ${typeof taskResult === 'object' ? JSON.stringify(taskResult) : String(taskResult)}`);
+			
+			// Clean up handles
+			resultHandle.value.dispose();
+			handles.forEach(h => {
+				try {
+					if (h.alive) h.dispose();
+				} catch (e) {
+					// Ignore errors in cleanup
+					hostLog(logPrefix, "warn", `Error disposing handle: ${e}`);
 				}
-					 jobsProcessed = jobsResult.value;
-					 // Remove per-job log
-					 // if (jobsProcessed > 0) { console.log("debug", "host", `Inner loop: Processed ${jobsProcessed} pending jobs.`); }
-				} while (jobsProcessed > 0 && rt?.alive);
-
-				if (executionError) { break; }
-
-				if (activeTimers.size > 0 && rt?.alive) {
-					// Log timer status less frequently
-					// if (Date.now() - lastTimerLogTime > 15000) { // Log every 15 seconds if timers are active // REMOVED Debug log
-					// 	console.log("debug", "host", `QuickJS idle but ${activeTimers.size} timers active. Yielding to host...`); // REMOVED Debug log
-					// 	lastTimerLogTime = Date.now(); // REMOVED Debug log
-					// }
-					await new Promise(resolve => setTimeout(resolve, 10));
-					continue;
-				} else {
-					 // console.log("debug", "host", "QuickJS idle and no active timers. Exiting job/timer loop."); // REMOVED Debug log
-					 break;
+			});
+			exports.dispose();
+			contextObj.dispose();
+			
+			// Remove disposed handles from active handles
+			activeHandles = activeHandles.filter(h => h.alive);
+			
+			// Update stack run record with result
+			if (stackRunId) {
+				// Update stack run record with result
+				const supabaseClient = createClient(SUPABASE_URL!, SUPABASE_SERVICE_ROLE_KEY!);
+				try {
+					await supabaseClient.from('stack_runs').update({
+						status: 'completed',
+						result: taskResult,
+						updated_at: new Date().toISOString()
+					}).eq('id', stackRunId);
+				} catch (dbError) {
+					hostLog(logPrefix, "error", `Database error updating stack run: ${dbError}`);
+					// Continue even with database error
 				}
-			} // End while loop
-
-			if (safetyBreak <= 0) {
-				console.log("warn", "host", "Safety break triggered during job/timer processing loop.");
-				executionError = `Task timed out after ${executionTimeoutSeconds}s (job/timer processing loop safety break).`;
 			}
-
-		} catch (loopError) {
-			console.log("error", "host", "Exception during job/timer processing loop:", [loopError]);
-			executionError = `Host exception during job/timer processing: ${loopError instanceof Error ? loopError.message : String(loopError)}`;
+			
+			return taskResult;
+		} catch (error: unknown) {
+			hostLog(logPrefix, "error", `Error extracting result: ${error instanceof Error ? error.message : String(error)}`);
+			throw new Error(`Error extracting result: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		//console.log("info", "host", "Exited job/timer processing loop.");
-
-
-		// --- Process Final Result --- (Keep this logic, logging is important here)
-		// console.log("debug", "host", "Processing final result..."); // REMOVED
-		if (executionError) {
-			 console.log("error", "host", `Task execution failed due to prior error: ${executionError}`);
-			 if (jobLoopErrorHandle) {
-				 finalResultHandle = jobLoopErrorHandle;
-             } else { /* finalResultHandle remains null */ }
-		} else if (evalResult && 'error' in evalResult) {
-		    // console.log("error", "host", "Task execution failed (initial evalPromise rejected)."); // Redundant if error is dumped below
- 		    // Handle potential undefined error handle
- 		    const errorHandle = evalResult.error;
- 		    if (errorHandle && errorHandle.alive) {
-		        const errorDump = ctx.dump(errorHandle);
-		        console.log("error", "host", "Task execution failed (initial eval error)", [errorDump]);
-			    executionError = simpleStringify(errorDump);
-			    finalResultHandle = errorHandle; // Assign only if valid
-		    } else {
-		        console.log("error", "host", "Task execution failed (initial eval error), but error handle was invalid/undefined.");
-		        executionError = "Evaluation failed with invalid error handle";
-		        finalResultHandle = null; // Ensure it's null
-		    }
-		} else {
-            //console.log("info", "host", "Attempting to retrieve globalThis.__result__ after job loop...");
-            let resultHandleAfterLoop: QuickJSHandle | undefined;
-            try {
-                resultHandleAfterLoop = ctx.getProp(ctx.global, "__result__");
-                if (resultHandleAfterLoop && resultHandleAfterLoop.alive && ctx.typeof(resultHandleAfterLoop) !== 'undefined') {
-                    // console.log("info", "host", "__result__ handle obtained. Dumping..."); // REMOVED - Less noise
-                    try {
-                        executionResult = ctx.dump(resultHandleAfterLoop);
-						// Log success concisely
-                        //console.log("info", "host", "Successfully dumped __result__.");
-						// Keep preview in debug console only
-						//console.log('[HOST] [DEBUG] Result Preview:', JSON.stringify(executionResult).slice(0, 200) + '...');
-                        finalResultHandle = resultHandleAfterLoop;
-                    } catch (dumpError: any) {
-                        const msg = dumpError?.message || dumpError;
-                        //console.log("error", "host", "Failed to DUMP __result__ handle after loop:", [msg]);
-                        executionError = `Failed to dump final result: ${msg}`;
-                        finalResultHandle = resultHandleAfterLoop;
-                    }
-                } else {
-                    // Check for __execution_error__ from VM first, then fallback to initial value if no __result__
-                    let vmErrorHandle: QuickJSHandle | undefined;
-                    try {
-                        vmErrorHandle = ctx.getProp(ctx.global, "__execution_error__");
-                        if (vmErrorHandle && vmErrorHandle.alive && ctx.typeof(vmErrorHandle) === 'object') {
-                             const vmError = ctx.dump(vmErrorHandle);
-                             console.log("error", "host", "Task execution failed inside VM", [vmError]);
-                             executionError = `VM Execution Error: ${vmError?.message || simpleStringify(vmError)}`;
-                             finalResultHandle = vmErrorHandle;
-                        } else {
-                            // console.log("warn", "host", "__result__ handle not found/invalid and no __execution_error__ found."); // REMOVED Warning
-                            if (vmErrorHandle) {
-                                if (vmErrorHandle.alive) {
-                                    vmErrorHandle!.dispose();
-                                }
-                            }
-                            // Fallback check
-                            if (evalResult && 'value' in evalResult && evalResult.value && evalResult.value.alive && ctx.typeof(evalResult.value) !== 'undefined') {
-                                // console.log("warn", "host", "Falling back to initial evalPromise settlement value (unexpected). Dumping..."); // REMOVED Warning
-                                try {
-                                    executionResult = ctx.dump(evalResult.value);
-                                    //console.log("info", "host", "Successfully dumped initial evalPromise settlement value (used as fallback result).");
-                                    finalResultHandle = evalResult.value;
-                                } catch (dumpError: any) { /* ... error handling ... */ }
-                            } else {
-                               // console.log("warn", "host", "No valid result or VM error found."); // REMOVED Warning
-                                executionResult = {};
-                                if (resultHandleAfterLoop?.alive) resultHandleAfterLoop.dispose();
-                                if (evalResult?.value?.alive) evalResult.value.dispose();
-                                finalResultHandle = null;
-                            }
-                        }
-                    } catch (getError: any) {
-                        // Handle the error from getting __execution_error__
-                        const msg = getError?.message || String(getError);
-                        console.log("error", "host", "Error getting __execution_error__:", [msg]);
-                        // Keep executionError as it might have been set earlier or default
-                        // vmErrorHandle is already known to be problematic, so don't assign it
-                    } finally {
-                        if (vmErrorHandle) {
-                            if (vmErrorHandle.alive) {
-                                vmErrorHandle!.dispose();
-                            }
-                        }
-                    }
-                    // Ensure original result handle is disposed if needed and different from the final handle
-                    if (resultHandleAfterLoop) {
-                        if (resultHandleAfterLoop.alive && resultHandleAfterLoop! !== finalResultHandle) {
-                            // console.log("debug", "host", "Disposing original resultHandleAfterLoop as it's not the final result handle."); // REMOVED Debug
-                            resultHandleAfterLoop!.dispose();
-                        }
-                    }
-                }
-            } catch (getError: any) {
-                const msg = getError?.message || getError;
-                console.log("error", "host", "Failed to GET __result__ handle after loop:", [msg]);
-                executionError = `Failed to get final result handle: ${msg}`;
-                // Check before disposing
-                if (resultHandleAfterLoop && resultHandleAfterLoop.alive) resultHandleAfterLoop.dispose();
-                finalResultHandle = null;
-            }
-        }
-
-
-	} catch (setupError) {
-		 const errorMessage = setupError instanceof Error ? setupError.message : String(setupError);
-		 console.log("error", "host", `Unhandled exception during setup: ${errorMessage}`, setupError instanceof Error ? [setupError.stack] : []);
-		executionError = errorMessage;
-		executionResult = null;
+	} catch (error: unknown) {
+		// Update stack run record with error if it exists
+		if (stackRunId) {
+			try {
+				const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+				const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+				
+				if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+					const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+					await supabaseClient.from('stack_runs').update({
+						status: 'failed',
+						error: { message: error instanceof Error ? error.message : String(error) },
+						updated_at: new Date().toISOString()
+					}).eq('id', stackRunId);
+				}
+			} catch (updateError) {
+				hostLog(logPrefix, "error", `Failed to update stack_run status: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+			}
+		}
+		
+		hostLog(logPrefix, "error", `Error executing task: ${error instanceof Error ? error.message : String(error)}`);
+		throw error;
 	} finally {
-		 // Keep final disposal logs
-		 if (finalResultHandle && finalResultHandle.alive && !handles.includes(finalResultHandle)){
-			 try {
-				 // console.log("debug", "host", "Disposing finalResultHandle in finally block."); // REMOVED Debug
- 				 finalResultHandle.dispose();
- 			 } catch(e) { console.warn(`[HOST] [WARN] Error disposing finalResultHandle: ${e instanceof Error ? e.message : String(e)}`); }
-		 }
-		 // console.log("debug", "host", "Disposing QuickJS tracked handles..."); // REMOVED Debug
- 		 while (handles.length > 0) {
- 			 const h = handles.pop();
- 			  try { if (h?.alive) h.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose handle err: ${e instanceof Error ? e.message : String(e)}`); }
-		 }
- 		 //console.log("info", "host", "Disposing QuickJS context and runtime...");
- 		 if (context?.alive) {
- 			 try { context.dispose(); } catch (e) { console.warn(`[HOST] [WARN] Dispose ctx err: ${e instanceof Error ? e.message : String(e)}`); }
- 		 } else {
- 			 // console.log("warn", "host", "Context already disposed before finally block."); // REMOVED Warning
- 		 }
- 		 context = null;
- 		 runtime = null;
- 		 //console.log("info", "host", `QuickJS resources cleanup finished. Total time: ${Date.now() - startTimestamp}ms`);
-	}
-
-	// --- Return Response --- (Keep final logging)
-	if (executionError) {
-		console.log("error", "host", "Sending error response.", [executionError]);
-		return new Response( JSON.stringify({ success: false, error: executionError }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
-	} else {
-		//console.log("info", "host", "Sending success response.");
-		const finalPayload = { success: true, result: executionResult };
+		// Clean up any remaining active handles
 		try {
-			const payloadString = JSON.stringify(finalPayload);
-			// Log preview to console only
-			// console.log(`[HOST] [DEBUG] Final success payload (stringified, length=${payloadString.length}): ${payloadString.substring(0, 500)}${payloadString.length > 500 ? '...' : ''}`); // REMOVED VERBOSE
-			// console.log("[HOST] [DEBUG] Value of executionResult being sent (type:", typeof executionResult, "):", executionResult); // POTENTIALLY LARGE
-		} catch (stringifyError) {
-			console.log("error", "host", "Failed to stringify final success payload!", [stringifyError]);
-			return new Response( JSON.stringify({ success: false, error: "Failed to stringify final result" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } } );
+			if (activeHandles.length > 0) {
+				hostLog(logPrefix, "info", `Cleaning up ${activeHandles.length} remaining handles`);
+				
+				for (const handle of activeHandles) {
+					try {
+						if (handle && handle.alive) {
+							handle.dispose();
+						}
+					} catch (e) {
+						// Ignore errors in final cleanup
+						hostLog(logPrefix, "warn", `Error in handle cleanup: ${e}`);
+					}
+				}
+			}
+		} catch (e) {
+			hostLog(logPrefix, "warn", `Error in active handles cleanup: ${e}`);
 		}
-		return new Response( JSON.stringify(finalPayload), { headers: { ...corsHeaders, "Content-Type": "application/json" } } );
+		
+		// Clean up QuickJS resources
+		if (vm) {
+			try {
+				vm.dispose();
+				hostLog(logPrefix, "info", "VM disposed");
+			} catch (e) {
+				hostLog(logPrefix, "warn", `Error disposing VM: ${e}`);
+			}
+		}
+		if (runtime) {
+			try {
+				runtime.dispose();
+				hostLog(logPrefix, "info", "Runtime disposed");
+			} catch (e) {
+				hostLog(logPrefix, "warn", `Error disposing runtime: ${e}`);
+			}
+		}
 	}
-});
+}
+
+/**
+ * Helper function to save an ephemeral call to the stack_runs table
+ * This standardizes how we handle all ephemeral calls throughout the codebase
+ */
+async function __saveEphemeralCall__(
+	vm: QuickJSAsyncContext,
+	stackRunId: string,
+	serviceName: string,
+	methodName: string,
+	args: any[],
+	parentStackRunId?: string | null,
+	parentTaskRunId?: string | null
+): Promise<boolean> {
+	try {
+		const logPrefix = "[__saveEphemeralCall__]";
+		hostLog(logPrefix, "info", `Saving ephemeral call ${stackRunId} for ${serviceName}.${methodName}`);
+		
+		// Use the vm-state-manager to save the stack run
+		const result = await saveVMState(
+			vm, 
+			stackRunId, 
+			serviceName, 
+			methodName, 
+			args, 
+			parentStackRunId, 
+			parentTaskRunId
+		);
+		
+		if (!result) {
+			hostLog(logPrefix, "error", `Failed to save VM state for stack run ${stackRunId}`);
+			return false;
+		}
+		
+		hostLog(logPrefix, "info", `Successfully saved stack run ${stackRunId}`);
+		return true;
+	} catch (error: unknown) {
+		hostLog("[__saveEphemeralCall__]", "error", `Error saving ephemeral call: ${error instanceof Error ? error.message : String(error)}`);
+		// Don't throw to prevent the QuickJS VM from crashing
+		return false;
+	}
+}
+
+// Wrap task code in a module pattern
+function wrapTaskCode(code: string): string {
+  return `
+    "use strict";
+    const _module = { exports: null };
+    const module = _module;
+    const exports = {};
+    const require = function(mod) { 
+      if (mod === 'async') return { async: true };
+      throw new Error('Cannot require ' + mod);
+    };
+    
+    // Add additional context for debugging
+    console.debug = console.log;
+    console.warn = console.log;
+    console.error = console.log;
+    
+    // Add Promise.allSettled if not available
+    if (typeof Promise.allSettled !== 'function') {
+      Promise.allSettled = function(promises) {
+        return Promise.all(
+          promises.map(p => 
+            p
+              .then(value => ({ status: 'fulfilled', value }))
+              .catch(reason => ({ status: 'rejected', reason }))
+          )
+        );
+      };
+    }
+
+    // Execute the task code
+    ${code}
+    
+    // Set the exports
+    _module.exports = exports;
+    
+    // Return the task function
+    module.exports;
+  `;
+}
 

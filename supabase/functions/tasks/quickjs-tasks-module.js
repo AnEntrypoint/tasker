@@ -1,7 +1,8 @@
 /**
  * QuickJS module for executing other tasks.
- * Relies on globally injected __hostFetch__(url, options)
- * and __runtimeConfig__.tasks object.
+ * Supports both direct execution and ephemeral call queueing.
+ * Relies on globally injected __hostFetch__(url, options),
+ * __runtimeConfig__.tasks object, and __saveEphemeralCall__ function.
  */
 
 if (typeof __hostFetch__ !== 'function') {
@@ -16,11 +17,45 @@ console.log('[QuickJS Tasks] Initializing tasks module...');
 const { baseUrl, headers } = __runtimeConfig__.tasks;
 const tasksUrl = baseUrl; // Assuming POST to the main tasks endpoint URL provided
 
+/**
+ * Execute a task using ephemeral call queueing or direct execution
+ * @param {string} taskName - The name of the task to execute
+ * @param {object} input - The input parameters for the task
+ * @returns {Promise<any>} - The result of the task execution
+ */
 async function execute(taskName, input) {
     if (!taskName || typeof taskName !== 'string') {
         throw new Error("taskName (string) is required to execute a task.");
     }
 
+    // Check if ephemeral call queueing is available
+    if (typeof __saveEphemeralCall__ === 'function') {
+        console.log(`[QuickJS Tasks] Executing task '${taskName}' via ephemeral call queueing`);
+
+        try {
+            // Save the ephemeral call and get the result
+            // This will suspend the VM execution and resume when the call completes
+            const result = await __saveEphemeralCall__('tasks', 'execute', [taskName, input || {}]);
+            console.log(`[QuickJS Tasks] Received ephemeral call result for task '${taskName}'`);
+            return result;
+        } catch (error) {
+            console.error(`[QuickJS Tasks] Error during ephemeral execution of task ${taskName}:`, error);
+            throw new Error(`Failed to execute task ${taskName}: ${error.message || error}`);
+        }
+    } else {
+        // Fall back to direct execution if ephemeral call queueing is not available
+        console.log(`[QuickJS Tasks] Ephemeral call queueing not available, falling back to direct execution for task '${taskName}'`);
+        return directExecute(taskName, input);
+    }
+}
+
+/**
+ * Execute a task directly using host fetch
+ * @param {string} taskName - The name of the task to execute
+ * @param {object} input - The input parameters for the task
+ * @returns {Promise<any>} - The result of the task execution
+ */
+async function directExecute(taskName, input) {
     const payload = {
         taskName: taskName,
         input: input || {} // Ensure input is at least an empty object
@@ -67,4 +102,4 @@ console.log('[QuickJS Tasks] Tasks module initialized.');
 
 module.exports = {
     execute
-}; 
+};

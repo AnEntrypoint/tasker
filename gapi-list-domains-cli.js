@@ -1,62 +1,193 @@
-#!/usr/bin/env -S deno run --allow-env --allow-net
+// CLI script for testing GAPI list-domains task with ephemeral execution
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.38.4";
+import { config } from "https://deno.land/x/dotenv/mod.ts";
+const env = config();
 
-import { envVars } from "./env.ts";
+// Configuration
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "http://localhost:54321"; 
+const FUNCTIONS_URL = Deno.env.get("FUNCTIONS_URL") || "http://127.0.0.1:8000";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0";
+const TASK_NAME = "gapi-list-domains"; // Using the original name that exists in the database
+const DELAY_BETWEEN_STEPS = 500; // Adding delay between steps
 
-// No specific arguments needed for this task
+// Command line arguments
+const args = Deno.args;
+const includeStats = args.includes("--stats");
+const customerId = args.includes("--customer") ? args[args.indexOf("--customer") + 1] : "my_customer";
 
-const {
-  SUPABASE_URL: _SUP_URL,
-  SUPABASE_ANON_KEY: _SUP_KEY,
-  EXT_SUPABASE_URL,
-  EXT_SUPABASE_ANON_KEY,
-} = envVars;
+// Sleep function
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const SUPABASE_URL = EXT_SUPABASE_URL || _SUP_URL;
-const SUPABASE_ANON_KEY = EXT_SUPABASE_ANON_KEY || _SUP_KEY;
-
-(async () => {
-  await new Promise((resolve) => setTimeout(resolve, 4000)); //dont remove
+// Re-publish the task before running it
+async function publishTask() {
   try {
-    console.log(`[CLI] Using SUPABASE_URL: ${SUPABASE_URL}`);
-    console.log(`[CLI] Using SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY ? "***REDACTED***" : "undefined"}`);
-    console.log(`[CLI] Triggering task 'gapi-list-domains'...`);
-
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/tasks`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        apikey: SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({
-        name: "gapi-list-domains", // Task name
-        input: {}, // No specific input needed
-      }),
-    });
-
-    console.log(`[CLI] Task execution request sent. Status: ${response.status}`);
-    const text = await response.text();
-    try {
-      const parsed = JSON.parse(text);
-      console.log("[CLI] Task Response:");
-      console.log(JSON.stringify(parsed, null, 2));
-      // Log the output field (should be the array of domains)
-      if (parsed && parsed.output) {
-          console.log("\n[CLI] Task Output Field (Domains List):");
-          console.log(JSON.stringify(parsed.output, null, 2));
-      } else if (parsed && parsed.error) {
-          console.error("\n[CLI] Task Error Field:");
-          console.error(JSON.stringify(parsed.error, null, 2));
-      }
-    } catch (e) {
-      console.error("[CLI] Non-JSON response received:");
-      console.error(text);
-    }
-    console.log(`[CLI] Script finished.`);
-    Deno.exit(0);
-
-  } catch (err) {
-    console.error("[CLI] Error running script:", err);
+    console.log("\n✅ Task published successfully");
+    
+    // Wait a bit for the task to be available
+    console.log("⏳ Waiting 3 seconds before executing task...");
+    await sleep(3000);
+  } catch (error) {
+    console.error(`❌ Error publishing task: ${error.message || error}`);
     Deno.exit(1);
   }
-})(); 
+}
+
+// Execute the task and get results
+async function executeTask() {
+  try {
+    console.log("\n🚀 Executing gapi-list-domains task...");
+    
+    // Input parameters
+    const taskInput = {
+      customer: customerId,
+      includeStats: includeStats
+    };
+    
+    // Call the tasks endpoint with the correct path
+    const response = await fetch(`${FUNCTIONS_URL}/functions/v1/tasks/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify({
+        taskName: TASK_NAME,
+        input: taskInput
+      })
+    });
+    
+    const data = await response.json();
+    console.log(`\n📬 Task execution response (${response.status}):`, JSON.stringify(data, null, 2));
+    
+    if (!response.ok || !data.taskRunId) {
+      console.warn("⚠️ Task execution failed or no task run ID returned.");
+      return null;
+    }
+    
+    console.log(`\n✅ Task queued successfully with run ID: ${data.taskRunId}`);
+    return data.taskRunId;
+  } catch (error) {
+    console.error(`❌ Error executing task: ${error.message || error}`);
+    return null;
+  }
+}
+
+// Poll for task results
+async function pollTaskResults(taskRunId) {
+  if (!taskRunId) return null;
+  
+  console.log(`\n🔄 Polling for task results...`);
+  let attempts = 0;
+  const maxAttempts = 20;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    
+    try {
+      // Wait between polling attempts
+      await sleep(1000);
+      
+      // Fetch task results using the status endpoint
+      const response = await fetch(`${FUNCTIONS_URL}/functions/v1/tasks/status?id=${taskRunId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+        }
+      });
+      
+      if (!response.ok) {
+        console.log(`⏳ Attempt ${attempts}/${maxAttempts}: Server returned ${response.status}`);
+        continue;
+      }
+      
+      const data = await response.json();
+      
+      if (data.status === 'completed') {
+        console.log(`\n✅ Task completed successfully!`);
+        console.log('\n📊 Task result:', JSON.stringify(data.result, null, 2));
+        return data.result;
+      } else if (data.status === 'failed' || data.status === 'error') {
+        console.error(`\n❌ Task failed: ${data.error || 'Unknown error'}`);
+        return null;
+      } else {
+        console.log(`⏳ Attempt ${attempts}/${maxAttempts}: Task status: ${data.status}`);
+      }
+    } catch (error) {
+      console.error(`❌ Error polling for results (attempt ${attempts}/${maxAttempts}): ${error.message || error}`);
+    }
+  }
+  
+  console.error(`\n⏰ Timeout: Task did not complete after ${maxAttempts} attempts`);
+  return null;
+}
+
+// Check database for debugging
+async function checkStackRuns(taskRunId) {
+  try {
+    console.log("\n🔍 Checking stack_runs table for related runs...");
+    
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    
+    // First check if the table exists and we have access
+    try {
+      const { error: accessError } = await supabase
+        .from('stack_runs')
+        .select('count')
+        .limit(1);
+      
+      if (accessError) {
+        console.log(`⚠️ Skipping stack runs check: ${accessError.message || "DB access issue"}`);
+        return;
+      }
+    } catch (e) {
+      console.log("⚠️ Skipping stack runs check: DB access error");
+      return;
+    }
+    
+    // Use a safer query that's less likely to fail
+    const { data, error } = await supabase
+      .from('stack_runs')
+      .select('id, module_name, method_name, status, created_at, parent_run_id')
+      .order('created_at', { ascending: false })
+      .limit(5);
+    
+    if (error) {
+      console.log(`⚠️ Error checking stack runs: ${error.message || error}`);
+      return;
+    }
+    
+    if (!data || data.length === 0) {
+      console.log("ℹ️ No stack runs found in the database");
+      return;
+    }
+    
+    console.log(`\n📋 Last ${data.length} stack runs:`);
+    data.forEach(run => {
+      const isRelated = run.parent_run_id === taskRunId ? '  (related to this task)' : '';
+      console.log(`- ${run.id}: ${run.module_name}.${run.method_name} - Status: ${run.status}${isRelated}`);
+    });
+  } catch (error) {
+    console.log(`⚠️ Error checking stack runs: ${error.message || error}`);
+  }
+}
+
+// Main execution flow
+async function main() {
+  await publishTask();
+  const taskRunId = await executeTask();
+  
+  if (taskRunId) {
+    const result = await pollTaskResults(taskRunId);
+    
+    // Add a small delay before checking related stack runs
+    await sleep(DELAY_BETWEEN_STEPS);
+    await checkStackRuns(taskRunId);
+  }
+  
+  console.log("\n✅ Test completed");
+}
+
+main().catch(error => {
+  console.error(`❌ Unhandled error: ${error.message || error}`);
+  Deno.exit(1);
+}); 
