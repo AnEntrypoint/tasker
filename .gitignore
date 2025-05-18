@@ -87,3 +87,4 @@ Thumbs.db
 
 # Generated content from tests
 generated_content_*.md 
+**/.claude/settings.local.json

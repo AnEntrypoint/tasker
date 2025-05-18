@@ -156,10 +156,23 @@ class KeystoreService {
   // List all keys in a namespace
   async listKeys(namespace: string): Promise<string[]> {
     console.log(`Listing keys in namespace ${namespace}`);
-    const { data } = await this.supabase
+    const response = await this.supabase
       .from('keystore')
       .select('name')
       .eq('scope', namespace);
+    
+    // Handle different response formats (direct array or nested body.data)
+    let data;
+    if (Array.isArray(response)) {
+      data = response;
+    } else if (response && response.body && Array.isArray(response.body.data)) {
+      data = response.body.data;
+    } else if (response && Array.isArray(response.data)) {
+      data = response.data;
+    } else {
+      console.error('Unexpected response format from wrappedsupabase:', response);
+      data = [];
+    }
     
     console.log(`Found ${data?.length || 0} keys in namespace ${namespace}`);
     return data?.length ? data.map((row: any) => row.name) : [];
@@ -182,8 +195,22 @@ class KeystoreService {
         throw new Error(`Failed during Supabase query for listNamespaces: ${message}`);
     }
     
-    const data = queryResult?.data;
-    const error = queryResult?.error;
+    // Handle different response formats (direct array or nested body.data)
+    let data;
+    let error;
+    
+    if (Array.isArray(queryResult)) {
+      data = queryResult;
+      error = null;
+    } else if (queryResult && queryResult.body) {
+      // Handle the wrapped structure from wrappedsupabase
+      data = queryResult.body.data;
+      error = queryResult.body.error;
+    } else {
+      // Handle direct response structure from Supabase client
+      data = queryResult?.data;
+      error = queryResult?.error;
+    }
 
     if (error) {
         console.error(`[KeystoreService] listNamespaces Supabase returned error:`, error);

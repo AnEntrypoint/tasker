@@ -5,12 +5,17 @@
   "main": "blog-generator-cli.js",
   "scripts": {
     "blog": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A blog-generator-cli.js test\"",
-    "nest": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A nested-task-cli.js test\"",
+    "keystore": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A test-live-keystore.ts test\"",
     "pre-gapi": "supabase db reset --confirm ; supabase start",
     "gapi": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./gapi-user-list-direct-test.js\"",
+    "gapi:list-domains": "npm run gapi:serve && npm run gapi:client",
+    "gapi:serve": "supabase functions serve --no-verify-jwt",
+    "gapi:client": "deno run -A ./gapi-list-domains-cli.js",
+    "ephemeral": "concurrently --kill-others \"npx supabase functions serve --no-verify-jwt\" \"deno run -A ./test-ephemeral-call.ts\"",
+    "test-ephemeral": "deno run -A ./test-ephemeral-call.ts",
     "gsuite": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno -A gsuite-gmail-search-cli.js test\"",
-    "gapi:list-domains": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./gapi-list-domains-cli.js\"",
-    "publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\""
+    "publish": "concurrently --kill-others \"supabase functions serve --no-verify-jwt\" \"deno run -A ./taskcode/publish.ts --all\"",
+    "task": "deno run -A run-task.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7"
