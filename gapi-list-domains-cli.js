@@ -147,7 +147,7 @@ async function checkStackRuns(taskRunId) {
     // Use a safer query that's less likely to fail
     const { data, error } = await supabase
       .from('stack_runs')
-      .select('id, module_name, method_name, status, created_at, parent_run_id')
+      .select('id, service_name, method_name, status, created_at, parent_task_run_id')
       .order('created_at', { ascending: false })
       .limit(5);
     
@@ -163,8 +163,8 @@ async function checkStackRuns(taskRunId) {
     
     console.log(`\n📋 Last ${data.length} stack runs:`);
     data.forEach(run => {
-      const isRelated = run.parent_run_id === taskRunId ? '  (related to this task)' : '';
-      console.log(`- ${run.id}: ${run.module_name}.${run.method_name} - Status: ${run.status}${isRelated}`);
+      const isRelated = run.parent_task_run_id === taskRunId ? '  (related to this task)' : '';
+      console.log(`- ${run.id}: ${run.service_name}.${run.method_name} - Status: ${run.status}${isRelated}`);
     });
   } catch (error) {
     console.log(`⚠️ Error checking stack runs: ${error.message || error}`);

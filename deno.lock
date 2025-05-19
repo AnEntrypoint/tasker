@@ -14,7 +14,11 @@
     "npm:concurrently@8.2.2": "8.2.2",
     "npm:concurrently@^8.2.2": "8.2.2",
     "npm:dotenv@^16.4.7": "16.5.0",
+    "npm:google-auth-library@9": "9.15.1",
+    "npm:google-auth-library@9.4.1": "9.4.1",
     "npm:googleapis@*": "146.0.0",
+    "npm:googleapis@133": "133.0.0",
+    "npm:googleapis@133.0.0": "133.0.0",
     "npm:openai@^4.52.5": "4.93.0",
     "npm:sdk-http-wrapper@1.0.10": "1.0.10_@supabase+supabase-js@2.49.4_openai@4.93.0",
     "npm:sdk-http-wrapper@1.0.9": "1.0.9",
@@ -508,6 +512,17 @@
         "jws"
       ]
     },
+    "google-auth-library@9.4.1": {
+      "integrity": "sha512-Chs7cuzDuav8W/BXOoRgSXw4u0zxYtuqAHETDR5Q6dG1RwNwz7NUKjsDDHAsBV3KkiiJBtJqjbzy1XU1L41w1g==",
+      "dependencies": [
+        "base64-js",
+        "ecdsa-sig-formatter",
+        "gaxios",
+        "gcp-metadata",
+        "gtoken",
+        "jws"
+      ]
+    },
     "google-logging-utils@0.0.2": {
       "integrity": "sha512-NEgUnEcBiP5HrPzufUkBzJOD/Sxsco3rLNo1F1TNf7ieU8ryUzBhqba8r756CjLX7rn3fHl6iLEwPYuqpoKgQQ=="
     },
@@ -516,16 +531,23 @@
       "dependencies": [
         "extend",
         "gaxios",
-        "google-auth-library",
+        "google-auth-library@9.15.1",
         "qs",
         "url-template",
         "uuid"
       ]
     },
+    "googleapis@133.0.0": {
+      "integrity": "sha512-6xyc49j+x7N4smawJs/q1i7mbSkt6SYUWWd9RbsmmDW7gRv+mhwZ4xT+XkPihZcNyo/diF//543WZq4szdS74w==",
+      "dependencies": [
+        "google-auth-library@9.15.1",
+        "googleapis-common"
+      ]
+    },
     "googleapis@146.0.0": {
       "integrity": "sha512-NewqvhnBZOJsugCAOo636O0BGE/xY7Cg/v8Rjm1+5LkJCjcqAzLleJ6igd5vrRExJLSKrY9uHy9iKE7r0PrfhQ==",
       "dependencies": [
-        "google-auth-library",
+        "google-auth-library@9.15.1",
         "googleapis-common"
       ]
     },
@@ -969,6 +991,7 @@
     "https://esm.sh/@supabase/node-fetch@^2.6.14?target=denonext": "https://esm.sh/@supabase/node-fetch@2.6.15?target=denonext",
     "https://esm.sh/@supabase/postgrest-js@^1.7.0?target=denonext": "https://esm.sh/@supabase/postgrest-js@1.19.4?target=denonext",
     "https://esm.sh/@supabase/postgrest-js@^1.8.5?target=denonext": "https://esm.sh/@supabase/postgrest-js@1.19.3?target=denonext",
+    "https://esm.sh/@supabase/postgrest-js@^1.8.6?target=denonext": "https://esm.sh/@supabase/postgrest-js@1.18.0?target=denonext",
     "https://esm.sh/@supabase/postgrest-js@^1.9.0?target=denonext": "https://esm.sh/@supabase/postgrest-js@1.19.4?target=denonext",
     "https://esm.sh/@supabase/realtime-js@^2.7.2?target=denonext": "https://esm.sh/@supabase/realtime-js@2.11.7?target=denonext",
     "https://esm.sh/@supabase/realtime-js@^2.8.4?target=denonext": "https://esm.sh/@supabase/realtime-js@2.11.3?target=denonext",
@@ -1334,6 +1357,8 @@
     "https://esm.sh/@supabase/gotrue-js@2.69.1?target=denonext": "292e91ea998566e337a060e8f0274dfdb02d0af1cc45366319c7a46fe53d3d31",
     "https://esm.sh/@supabase/node-fetch@2.6.15/denonext/node-fetch.mjs": "0bae9052231f4f6dbccc7234d05ea96923dbf967be12f402764580b6bf9f713d",
     "https://esm.sh/@supabase/node-fetch@2.6.15?target=denonext": "4d28c4ad97328403184353f68434f2b6973971507919e9150297413664919cf3",
+    "https://esm.sh/@supabase/postgrest-js@1.18.0/denonext/postgrest-js.mjs": "abbb69f251c81287f4b10853cd1ce42016cab2930f135727cc3e6d569f304666",
+    "https://esm.sh/@supabase/postgrest-js@1.18.0?target=denonext": "01f933e151cb9b4ca619465c34ddd1b5f524f565d7fdaf72210626dbb7a84eb4",
     "https://esm.sh/@supabase/postgrest-js@1.19.2/denonext/postgrest-js.mjs": "d0a1bb70df26f658c9129401b4677510e359f66646f45bb98adfeb14c2b58560",
     "https://esm.sh/@supabase/postgrest-js@1.19.3/denonext/postgrest-js.mjs": "03c7f7f1c8c79cc780db4fed98fb9912efde5a7fb3a751f8fbc8f6422706c134",
     "https://esm.sh/@supabase/postgrest-js@1.19.3?target=denonext": "96a5347b2c0f7ce3d88c3450e81475ed323838cb1fc99249c320c2a6c02f9fae",
@@ -1353,6 +1378,8 @@
     "https://esm.sh/@supabase/supabase-js@2.24.0/denonext/supabase-js.mjs": "0dd7358805ed5de1afd83e0e97bdbbbd537f74e4f86aee4834e9a062857fc164",
     "https://esm.sh/@supabase/supabase-js@2.38.4": "039569070c2e83c292b347c39879a10e76aac6079c166f2e2677453a7799e933",
     "https://esm.sh/@supabase/supabase-js@2.38.4/denonext/supabase-js.mjs": "c9a6b6de54aa47e98b836b90dd0f7dd292afc990762b2c84e77aca92e94d05ba",
+    "https://esm.sh/@supabase/supabase-js@2.39.1": "6c94f5a66f398ff962041bb888749daa908f7a27db4121fc58e8605acc0df05e",
+    "https://esm.sh/@supabase/supabase-js@2.39.1/denonext/supabase-js.mjs": "7e54826328ec2b9b11dd1ec74ec949f25bc522d90cda5fd6100bb54ca2e330d5",
     "https://esm.sh/@supabase/supabase-js@2.39.3": "832d7714491bd1c8a9008a332b35cb099f24b451ad79e755ecf4d71985fd6610",
     "https://esm.sh/@supabase/supabase-js@2.39.3/denonext/supabase-js.mjs": "054f4cd1560fa814cdc10d06c0809b00d0817dc06a072fa983e4c023e4346439",
     "https://esm.sh/@supabase/supabase-js@2.39.7": "5361671c958daa350e504d9975da64b2d6dc9e81390b985ccdafb2e3572e24e7",

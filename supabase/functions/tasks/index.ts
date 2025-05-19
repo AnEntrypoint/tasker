@@ -358,11 +358,11 @@ async function statusHandler(req: Request): Promise<Response> {
                        !extSupabaseUrl;
                        
         const baseUrl = useKong 
-            ? 'http://kong:8000/rest/v1/task_runs' 
-            : `${SUPABASE_URL}/rest/v1/task_runs`;
+            ? 'http://kong:8000/rest/v1' 
+            : `${SUPABASE_URL}/rest/v1`;
         
         // Fetch task run from database
-        const dbUrl = `${baseUrl}?id=eq.${taskRunId}&select=*`;
+        const dbUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}&select=*`;
         hostLog(logPrefix, 'info', `Attempting to fetch task run from: ${dbUrl}`);
         
         const response = await fetch(dbUrl, {
@@ -393,6 +393,186 @@ async function statusHandler(req: Request): Promise<Response> {
         }
         
         const taskRun = tasks[0];
+        
+        // Check if task has been stuck in 'queued' or 'processing' state
+        if ((taskRun.status === 'queued' || taskRun.status === 'processing') && taskRun.created_at) {
+            const createdAt = new Date(taskRun.created_at);
+            const now = new Date();
+            const diffInSeconds = Math.floor((now.getTime() - createdAt.getTime()) / 1000);
+            
+            // Even for recent tasks, do a quick check for completed results
+            hostLog(logPrefix, 'info', `Task is in ${taskRun.status} state for ${diffInSeconds} seconds, checking if there's a completed stack run`);
+            
+            // First try: Get the stack run associated with this task
+            try {
+                // Use parent_task_run_id field
+                const stackRunUrl = `${baseUrl}/stack_runs?select=*&parent_task_run_id=eq.${taskRunId}&status=eq.completed&order=created_at.desc&limit=1`;
+                const stackRunResponse = await fetch(stackRunUrl, {
+                    headers: {
+                        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (stackRunResponse.ok) {
+                    const stackRuns = await stackRunResponse.json();
+                    
+                    if (stackRuns && stackRuns.length > 0) {
+                        const completedStackRun = stackRuns[0];
+                        hostLog(logPrefix, 'warn', `Found completed stack run ${completedStackRun.id} with result, updating task run status`);
+                        
+                        // Update the task run to completed with the result from the stack run
+                        const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                        const updateResponse = await fetch(updateUrl, {
+                            method: 'PATCH',
+                            headers: {
+                                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                'apikey': SERVICE_ROLE_KEY,
+                                'Content-Type': 'application/json',
+                                'Prefer': 'return=minimal'
+                            },
+                            body: JSON.stringify({
+                                status: 'completed',
+                                result: completedStackRun.result,
+                                updated_at: new Date().toISOString(),
+                                ended_at: new Date().toISOString()
+                            })
+                        });
+                        
+                        if (!updateResponse.ok) {
+                            const updateError = await updateResponse.text();
+                            hostLog(logPrefix, 'error', `Failed to update task run status: ${updateError}`);
+                        } else {
+                            hostLog(logPrefix, 'info', `Successfully updated task run ${taskRunId} to completed status`);
+                            
+                            // Update the taskRun object with the new status and result
+                            taskRun.status = 'completed';
+                            taskRun.result = completedStackRun.result;
+                            taskRun.updated_at = new Date().toISOString();
+                            taskRun.ended_at = new Date().toISOString();
+                        }
+                    } else {
+                        // Try a different query using parent_task_run_id field (handles legacy/compatibility)
+                        try {
+                            const altStackRunUrl = `${baseUrl}/stack_runs?select=*&parent_task_run_id=eq.${taskRunId}&status=eq.completed&order=created_at.desc&limit=1`;
+                            const altStackRunResponse = await fetch(altStackRunUrl, {
+                                headers: {
+                                    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                    'apikey': SERVICE_ROLE_KEY
+                                }
+                            });
+                            
+                            if (altStackRunResponse.ok) {
+                                const altStackRuns = await altStackRunResponse.json();
+                                
+                                if (altStackRuns && altStackRuns.length > 0) {
+                                    const completedStackRun = altStackRuns[0];
+                                    hostLog(logPrefix, 'warn', `Found completed stack run ${completedStackRun.id} with result (via parent_task_run_id), updating task run status`);
+                                    
+                                    // Update the task run to completed with the result from the stack run
+                                    const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                                    const updateResponse = await fetch(updateUrl, {
+                                        method: 'PATCH',
+                                        headers: {
+                                            'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                            'apikey': SERVICE_ROLE_KEY,
+                                            'Content-Type': 'application/json',
+                                            'Prefer': 'return=minimal'
+                                        },
+                                        body: JSON.stringify({
+                                            status: 'completed',
+                                            result: completedStackRun.result,
+                                            updated_at: new Date().toISOString(),
+                                            ended_at: new Date().toISOString()
+                                        })
+                                    });
+                                    
+                                    if (updateResponse.ok) {
+                                        hostLog(logPrefix, 'info', `Successfully updated task run ${taskRunId} to completed status (via parent_task_run_id)`);
+                                        
+                                        // Update the taskRun object
+                                        taskRun.status = 'completed';
+                                        taskRun.result = completedStackRun.result;
+                                        taskRun.updated_at = new Date().toISOString();
+                                        taskRun.ended_at = new Date().toISOString();
+                                    }
+                                } else {
+                                    hostLog(logPrefix, 'info', `No completed stack run found for task run ${taskRunId} with either query method`);
+                                    
+                                    // For long-running tasks, check if we need a manual cleanup
+                                    if (diffInSeconds > 60) {
+                                        hostLog(logPrefix, 'warn', `Task has been stuck in ${taskRun.status} state for over 60 seconds, performing manual check`);
+                                        
+                                        // Fallback: Try to find any stack run related to this task
+                                        try {
+                                            if (taskRunData.waiting_on_stack_run_id) {
+                                                // If we have a waiting_on_stack_run_id, just look at that
+                                                return null; // We'll check again later
+                                            }
+                                            
+                                            const allStackRunsUrl = `${baseUrl}/stack_runs?select=*&or=(parent_task_run_id.eq.${taskRunId})&order=created_at.desc&limit=1`;
+                                            
+                                            hostLog('info', logPrefix, `Checking for any stack runs: ${allStackRunsUrl}`);
+                                            
+                                            const allStackRunsResponse = await fetch(allStackRunsUrl, {
+                                                headers: {
+                                                    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                                    'Content-Type': 'application/json'
+                                                }
+                                            });
+                                            
+                                            if (allStackRunsResponse.ok) {
+                                                const allStackRuns = await allStackRunsResponse.json();
+                                                
+                                                if (allStackRuns && allStackRuns.length > 0) {
+                                                    const latestStackRun = allStackRuns[0];
+                                                    hostLog(logPrefix, 'warn', `Found stack run ${latestStackRun.id} with status ${latestStackRun.status}, but no completed result`);
+                                                    
+                                                    // If task has been running too long, mark as error
+                                                    if (diffInSeconds > 120) {
+                                                        const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                                                        await fetch(updateUrl, {
+                                                            method: 'PATCH',
+                                                            headers: {
+                                                                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                                                'apikey': SERVICE_ROLE_KEY,
+                                                                'Content-Type': 'application/json',
+                                                                'Prefer': 'return=minimal'
+                                                            },
+                                                            body: JSON.stringify({
+                                                                status: 'error',
+                                                                error: { message: 'Task execution timed out after 120 seconds' },
+                                                                updated_at: new Date().toISOString(),
+                                                                ended_at: new Date().toISOString()
+                                                            })
+                                                        });
+                                                        
+                                                        taskRun.status = 'error';
+                                                        taskRun.error = { message: 'Task execution timed out after 120 seconds' };
+                                                        taskRun.updated_at = new Date().toISOString();
+                                                        taskRun.ended_at = new Date().toISOString();
+                                                    }
+                                                }
+                                            }
+                                        } catch (e) {
+                                            hostLog(logPrefix, 'error', `Error checking for completed stack runs: ${e instanceof Error ? e.message : String(e)}`);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (altError) {
+                            hostLog(logPrefix, 'error', `Error checking alternative stack runs query: ${altError instanceof Error ? altError.message : String(altError)}`);
+                        }
+                    }
+                } else {
+                    const stackRunError = await stackRunResponse.text();
+                    hostLog(logPrefix, 'error', `Failed to check for completed stack runs: ${stackRunError}`);
+                }
+            } catch (e) {
+                hostLog(logPrefix, 'error', `Error checking for completed stack runs: ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+        
         hostLog(logPrefix, 'info', `Returning task run with status: ${taskRun.status}`);
         
         // Extra handling for error states to make debugging easier

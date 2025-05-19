@@ -14,7 +14,7 @@ Tasker is a modular task execution system that uses QuickJS for secure, sandboxe
 
 4. **Task Manager**: Publishes tasks to the database and provides information about available tasks.
 
-5. **Service Proxies**: Wrap external services like Google API, providing a secure interface for tasks.
+5. **Service Proxies**: Wrap external services like Google API, OpenAI, Supabase, and web search, providing a secure interface for tasks.
 
 ### Database Schema
 
@@ -117,19 +117,30 @@ npm run task -- --task gapi-list-domains-with-nested --poll
 
 For more details on using the task executor, see [TASK_EXECUTOR_USAGE.md](TASK_EXECUTOR_USAGE.md).
 
-## Development
+## System Status
 
-1. Create a new task in `taskcode/endpoints/`
-2. Publish it using the publish script
-3. Run it using the task executor
-4. Check the database for task runs and results
+The system successfully implements:
 
-## Technical Implementation Details
+1. **Basic Ephemeral Execution**:
+   - Simple tasks run successfully
+   - Task runs are saved to database with proper status
+   - Results are extracted and returned correctly
 
-1. The QuickJS executor creates an isolated JavaScript environment for each task.
-2. When a task makes a nested call, the VM state is serialized and execution pauses.
-3. Stack runs are processed sequentially by the stack processor.
-4. The system handles promise resolution by explicitly managing job processing in QuickJS.
-5. Service proxies convert JavaScript method calls into HTTP requests to service endpoints.
-6. Results from nested calls are properly passed back to parent tasks.
-7. Task runs are tracked persistently while stack runs are ephemeral and deleted after execution.
+2. **Service Integration**:
+   - Authentication with services works (e.g., Google API)
+   - Service proxies handle method calls and return results
+   - Nested service calls are properly chained
+
+3. **VM State Management**:
+   - VM state is properly saved and restored
+   - Parent/child relationships between stack runs are maintained
+   - Results propagate correctly between stack runs
+
+## Additional Documentation
+
+For more detailed information, see:
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Detailed system architecture
+- [EPHEMERAL_EXECUTION_GUIDE.md](EPHEMERAL_EXECUTION_GUIDE.md) - Comprehensive guide to ephemeral execution
+- [QUICKJS_PROMISE_GUIDE.md](QUICKJS_PROMISE_GUIDE.md) - Guide to handling promises in QuickJS
+- [TASK_EXECUTOR_USAGE.md](TASK_EXECUTOR_USAGE.md) - Task executor CLI usage

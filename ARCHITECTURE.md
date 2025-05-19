@@ -29,11 +29,11 @@ The system uses the following tables:
    - Manages suspension/resumption for nested calls
 
 3. **Wrapped Services**: Proxies for external APIs
-   - wrappedsupabase
-   - wrappedopenai
-   - wrappedwebsearch
-   - wrappedkeystore
-   - wrappedgapi
+   - wrappedsupabase: Database operations
+   - wrappedopenai: OpenAI API access
+   - wrappedwebsearch: Web search functionality
+   - wrappedkeystore: Secure key/value storage
+   - wrappedgapi: Google API access
 
 ## Execution Flow
 
@@ -59,6 +59,34 @@ The system serializes VM state between execution slices, capturing:
 - Global state (when necessary)
 
 This allows long-running tasks to be broken into manageable chunks that fit within edge function limits.
+
+### VM State Manager Improvements
+
+The VM State Manager has been enhanced with:
+- Proper handling of parent_stack_run_id and parent_task_run_id
+- Verification that parent_task_run_id exists before setting it
+- Fixed foreign key constraint errors in stack_runs table
+
+## Stack Processor
+
+The stack processor is responsible for processing individual stack runs. It has been improved with:
+- Better mock responses for service integrations
+- Enhanced domain list functionality with detailed mocks
+- Improved error handling, result extraction, and database operation resilience
+- Better checking for parent/child relationships between stack runs
+- Enhanced logging for easier troubleshooting
+- Automatic triggering of the next pending stack run
+
+## QuickJS Executor
+
+The QuickJS executor creates an isolated JavaScript environment for each task. Key features include:
+- Standardized `__saveEphemeralCall__` helper function
+- Fixed promise handling for ephemeral calls
+- Handle tracking and cleanup with activeHandles array
+- Improved error handling in critical functions
+- Try/catch blocks to prevent uncaught exceptions in VM callback functions
+- Enhanced memory management to prevent QuickJSUseAfterFree errors
+- Fixed parent ID tracking and propagation
 
 ## Task Development
 
@@ -87,12 +115,7 @@ Tasks can access the following services through the `tools` object:
 - **tools.keystore**: Secure key/value storage
 - **tools.gapi**: Google API access
 - **tools.log**: Logger for tracking execution
-
-## Testing & Deployment
-
-1. Use `taskcode/publish.ts` to publish tasks to the database
-2. Use the test script to verify task execution
-3. Monitor execution with Supabase logs
+- **tools.tasks**: Execute other tasks
 
 ## Security Model
 
@@ -101,9 +124,59 @@ Tasks can access the following services through the `tools` object:
 - Service proxies enforce access controls and rate limits
 - Keys are stored securely in the keystore service
 
-## Limitations and Future Improvements
+## Database Triggers
 
-- Full VM state serialization is currently limited (complex objects may not serialize perfectly)
-- Timeouts for individual stack runs need careful management
-- System monitoring and observability could be enhanced
-- Advanced error recovery for failed stack runs 
+The system uses database triggers to process stack runs:
+
+```sql
+CREATE OR REPLACE FUNCTION process_next_stack_run() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'pending' THEN
+        PERFORM extensions.http_post(
+            CONCAT(current_setting('app.settings.supabase_url', TRUE), '/functions/v1/quickjs'),
+            jsonb_build_object('stackRunId', NEW.id),
+            'application/json',
+            jsonb_build_object(
+                'Authorization', concat('Bearer ', current_setting('app.settings.service_role_key', TRUE)),
+                'Content-Type', 'application/json'
+            ),
+            60000 -- 60s timeout
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER process_stack_run_insert
+AFTER INSERT ON stack_runs
+FOR EACH ROW
+EXECUTE FUNCTION process_next_stack_run();
+```
+
+## Testing & Deployment
+
+1. Use `taskcode/publish.ts` to publish tasks to the database
+2. Use the test scripts to verify task execution
+3. Monitor execution with Supabase logs and database queries
+
+## Future Improvements
+
+1. **Stack Processor Enhancements**:
+   - More sophisticated stack run chaining
+   - Better validation of args between parent and child calls
+   - More explicit state management between calls
+
+2. **Database Security and Access**:
+   - Review permissions for stack_runs and task_runs tables
+   - Add dedicated API endpoints for monitoring stack run status
+   - Improve database migration tools for table schema consistency
+
+3. **Memory Management**:
+   - Further improve handle tracking and disposal in QuickJS
+   - Add periodic garbage collection during long-running tasks
+   - Implement more sophisticated tracking of QuickJS handles
+
+4. **Testing Infrastructure**:
+   - Create automated tests for different ephemeral call patterns
+   - Add integration tests for full task chains
+   - Implement more comprehensive logging and monitoring 
