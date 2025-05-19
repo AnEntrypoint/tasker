@@ -45,23 +45,101 @@ class KeystoreService {
         console.log(`[KeystoreService Constructor] Using provided EXT_SUPABASE_URL for wrappedsupabase proxy: ${extSupabaseUrl}`);
     }
     
-    const baseUrl = useKong 
-        ? 'http://kong:8000/functions/v1/wrappedsupabase' 
-        : `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
-
-    console.log(`[KeystoreService Constructor] Final wrappedsupabase proxy baseUrl: ${baseUrl}`);
-
-    // Create the service proxy using the determined baseUrl
-    this.supabase = createServiceProxy('supabase', {
-      baseUrl: baseUrl, 
-      headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-        'apikey': serviceRoleKey, // Pass service key as apikey too for consistency?
-        'x-supabase-role': 'service_role' // Ensure service role is used
+    // In local development, try 3 different approaches to connect to wrappedsupabase:
+    // 1. Kong URL for Docker networking
+    // 2. Localhost URL for direct access
+    // 3. SUPABASE_URL env var as fallback
+    const kongUrl = 'http://kong:8000/functions/v1/wrappedsupabase';
+    const localhostUrl = 'http://127.0.0.1:8000/functions/v1/wrappedsupabase';
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseWrappedUrl = supabaseUrl ? `${supabaseUrl}/functions/v1/wrappedsupabase` : null;
+    
+    // Default to Kong in local development, but we'll test connection and fallback if needed
+    let baseUrl = useKong ? kongUrl : `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
+    
+    console.log(`[KeystoreService Constructor] Initial wrappedsupabase proxy baseUrl: ${baseUrl}`);
+    
+    // Create the test function to verify connectivity
+    this.testConnectivity = async () => {
+      if (!this.supabase) return false;
+      
+      try {
+        // Simple test query
+        const testResponse = await this.supabase.from('keystore').select('id').limit(1);
+        return !!testResponse; // If we get any response, consider it connected
+      } catch (error: unknown) {
+        console.error(`[KeystoreService] Test connection failed: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
       }
-    });
-    console.log("[KeystoreService Constructor] KeystoreService initialized.");
+    };
+    
+    // Initialize with our current best guess URL
+    this.initializeSupabase(baseUrl, serviceRoleKey);
+    
+    // In local development, try alternative URLs if the initial one fails
+    if (useKong) {
+      // For local development, immediately try to validate the connection
+      (async () => {
+        try {
+          // Test initial connection
+          const connected = await this.testConnectivity();
+          if (connected) {
+            console.log(`[KeystoreService] Successfully connected to ${baseUrl}`);
+            return; // Connection is working, no need to try alternatives
+          }
+          
+          // If Kong URL fails, try localhost directly
+          console.log(`[KeystoreService] Failed to connect via Kong URL, trying localhost fallback...`);
+          this.initializeSupabase(localhostUrl, serviceRoleKey);
+          
+          const localhostConnected = await this.testConnectivity();
+          if (localhostConnected) {
+            console.log(`[KeystoreService] Successfully connected to localhost fallback: ${localhostUrl}`);
+            return;
+          }
+          
+          // If localhost fails and we have a SUPABASE_URL, try that
+          if (supabaseWrappedUrl) {
+            console.log(`[KeystoreService] Trying SUPABASE_URL fallback: ${supabaseWrappedUrl}`);
+            this.initializeSupabase(supabaseWrappedUrl, serviceRoleKey);
+            
+            const supabaseFallbackConnected = await this.testConnectivity();
+            if (supabaseFallbackConnected) {
+              console.log(`[KeystoreService] Successfully connected to SUPABASE_URL fallback: ${supabaseWrappedUrl}`);
+              return;
+            }
+          }
+          
+          console.error(`[KeystoreService] All connection attempts failed. Service may not work correctly.`);
+        } catch (err: unknown) {
+          console.error(`[KeystoreService] Error during connectivity testing: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })();
+    }
+    
+    console.log(`[KeystoreService Constructor] KeystoreService initialized.`);
   }
+  
+  // Initialize the Supabase client with the given URL
+  private async initializeSupabase(baseUrl: string, serviceRoleKey: string) {
+    try {
+      console.log(`[KeystoreService] Initializing Supabase client with baseUrl: ${baseUrl}`);
+      
+      this.supabase = createServiceProxy('supabase', {
+        baseUrl,
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey
+        }
+      });
+    } catch (error: unknown) {
+      console.error(`[KeystoreService] Failed to initialize Supabase client: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+  
+  // Test connectivity to Supabase
+  private testConnectivity: () => Promise<boolean> = async () => false;
 
   // Get a stored key value
   async getKey(namespace: string, key: string): Promise<string | null> {
@@ -178,6 +256,28 @@ class KeystoreService {
     return data?.length ? data.map((row: any) => row.name) : [];
   }
   
+  // Check if a key exists in a namespace
+  async hasKey(namespace: string, key: string): Promise<boolean> {
+    console.log(`Checking if key ${key} exists in namespace ${namespace}`);
+    const result = await this.supabase
+      .from('keystore')
+      .select('id') // Only select ID to minimize data transfer
+      .eq('name', key)
+      .eq('scope', namespace)
+      .limit(1);
+    
+    // Handle different response formats
+    let exists = false;
+    if (Array.isArray(result) && result.length > 0) {
+      exists = true;
+    } else if (result && Array.isArray(result.data) && result.data.length > 0) {
+      exists = true;
+    }
+    
+    console.log(`Key ${namespace}/${key} exists: ${exists}`);
+    return exists;
+  }
+  
   // List all namespaces
   async listNamespaces(): Promise<string[]> {
     console.log(`[KeystoreService] Attempting listNamespaces...`);
@@ -247,6 +347,7 @@ const META = {
     { name: 'getKey', description: 'Get a stored key value' },
     { name: 'setKey', description: 'Store a key value' },
     { name: 'listKeys', description: 'List all keys in a namespace' },
+    { name: 'hasKey', description: 'Check if a key exists in a namespace' },
     { name: 'listNamespaces', description: 'List all namespaces' },
     { name: 'getServerTime', description: 'Get current server time' }
   ]

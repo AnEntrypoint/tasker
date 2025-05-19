@@ -71,6 +71,32 @@ const tools = {
     },
     getServerTime: () => __hostExecuteChain__('websearch', 'getServerTime', {})
      // Add other websearch methods if needed
+  },
+  gapi: {
+    authenticate: (scopeType) => {
+      console.log(`[QuickJS Tools] Calling gapi.authenticate with scope: ${scopeType}`);
+      return __hostExecuteChain__('gapi', 'authenticate', scopeType);
+    },
+    admin: {
+      domains: {
+        list: (params) => {
+          console.log(`[QuickJS Tools] Calling gapi.admin.domains.list with params: ${JSON.stringify(params)}`);
+          return __hostExecuteChain__('gapi', 'admin.domains.list', params);
+        }
+      },
+      users: {
+        list: (params) => {
+          console.log(`[QuickJS Tools] Calling gapi.admin.users.list with params: ${JSON.stringify(params)}`);
+          return __hostExecuteChain__('gapi', 'admin.users.list', params);
+        }
+      },
+      customers: {
+        get: (params) => {
+          console.log(`[QuickJS Tools] Calling gapi.admin.customers.get with params: ${JSON.stringify(params)}`);
+          return __hostExecuteChain__('gapi', 'admin.customers.get', params);
+        }
+      }
+    }
   }
 };
 

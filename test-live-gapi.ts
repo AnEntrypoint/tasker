@@ -4,65 +4,95 @@ import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.10/client';
 // Load environment variables
 const env = config();
 
-const GAPI_WRAPPER_URL = `${env.SUPABASE_URL}/functions/v1/wrappedgapi`;
+// Get the Supabase URL from environment variables
+const SUPABASE_URL = env.SUPABASE_URL || "http://localhost:8000";
+const GAPI_WRAPPER_URL = `${SUPABASE_URL}/functions/v1/wrappedgapi`;
 
-// Create the GAPI service proxy
-const gapi = createServiceProxy('gapi', { // Use 'gapi' as the service name, matching the server's sdkConfig
+console.log('Using Supabase URL:', SUPABASE_URL);
+console.log('GAPI Wrapper URL:', GAPI_WRAPPER_URL);
+
+// Create the GAPI service proxy with detailed debug info
+const gapi = createServiceProxy('gapi', {
     baseUrl: GAPI_WRAPPER_URL,
     headers: {
-      'Authorization': `Bearer ${env.SUPABASE_ANON_KEY}`,
-      'apikey': env.SUPABASE_ANON_KEY, 
-      // Content-Type is usually handled by the proxy for JSON
+      'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY || env.EXT_SUPABASE_SERVICE_ROLE_KEY}`,
+      'apikey': env.SUPABASE_ANON_KEY,
+      'X-Debug-Mode': 'true' // Request additional debugging info
     }
 });
 
-// --- Function to get Customer ID ---
-async function getCustomerId(): Promise<string> {
-    console.log('\nFetching Customer ID...');
-    try {
-        const customerInfo = await gapi.admin.customers.get({ customerKey: 'my_customer' });
-        const customerId = customerInfo?.id;
-        if (customerId) {
-            console.log(`Successfully fetched Customer ID: ${customerId}`);
-            return customerId;
-        } else {
-            console.error('Could not find Customer ID in response:', JSON.stringify(customerInfo, null, 2));
-            throw new Error('Customer ID not found in customers.get response.');
-        }
-    } catch (error) {
-        console.error('Error fetching Customer ID:', error);
-         if (typeof error === 'object' && error !== null && 'response' in error && 
-            typeof error.response === 'object' && error.response !== null && 'data' in error.response) {
-            console.error('Error details from proxy:', JSON.stringify((error.response as any).data, null, 2));
-        }
-        throw error; // Re-throw the error to stop execution if ID fetch fails
-    }
-}
-// --- End Function ---
-
-async function runTest() {
-    await new Promise((resolve) => setTimeout(resolve, 3000));// do not remove this
-
-  // --- Get Customer ID first ---
-  let customerId: string;
-  try {
-      customerId = await getCustomerId();
-  } catch (error) {
-      console.error("Failed to get Customer ID, aborting user tests.");
-      return; 
+// Create keystore service proxy
+const keystore = createServiceProxy('keystore', {
+  baseUrl: `${SUPABASE_URL}/functions/v1/wrappedkeystore`,
+  headers: {
+    'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY || env.EXT_SUPABASE_SERVICE_ROLE_KEY}`,
+    'apikey': env.SUPABASE_ANON_KEY
   }
-  // --- End Get Customer ID ---
+});
 
+let adminEmail: string | null = null;
+
+async function checkKeystore() {
+  console.log('\nChecking keystore for GAPI credentials...');
+  
+  try {
+    // Check if GAPI credentials exist
+    const adminEmailExists = await keystore.hasKey('global', 'GAPI_ADMIN_EMAIL');
+    console.log('GAPI_ADMIN_EMAIL exists:', adminEmailExists);
+    
+    if (adminEmailExists) {
+      adminEmail = await keystore.getKey('global', 'GAPI_ADMIN_EMAIL');
+      console.log('GAPI_ADMIN_EMAIL value:', adminEmail);
+    }
+    
+    const gapiKeyExists = await keystore.hasKey('global', 'GAPI_KEY');
+    console.log('GAPI_KEY exists:', gapiKeyExists);
+    
+    // Explicitly check the credential structure
+    if (gapiKeyExists) {
+      try {
+        const gapiKey = await keystore.getKey('global', 'GAPI_KEY');
+        if (gapiKey) {
+          const creds = JSON.parse(gapiKey);
+          console.log('GAPI credentials are valid:');
+          console.log('- client_email:', creds.client_email);
+          console.log('- private_key exists:', !!creds.private_key);
+        }
+      } catch (e) {
+        console.error('Error parsing GAPI_KEY:', e);
+      }
+    }
+    
+    return adminEmailExists && gapiKeyExists;
+  } catch (error) {
+    console.error('Error checking keystore:', error);
+    return false;
+  }
+}
+
+async function runUserTest() {
   console.log('\nTesting wrappedgapi via SDK Proxy (List Users)...');
   
   try {
-    console.log('Calling gapi.admin.users.list via proxy with Customer ID...');
-    // Note: The chain is gapi (proxy name) -> admin (instance in wrapper) -> users -> list
-    const result = await gapi.admin.users.list({
-        customer: customerId, // Use fetched Customer ID
-        // domain: 'coas.co.za', // Use domain parameter instead
-        maxResults: 5             
+    if (!adminEmail) {
+      console.warn('No admin email available. Please make sure GAPI_ADMIN_EMAIL is set in the keystore.');
+      return;
+    }
+    
+    console.log('Calling gapi.admin.users.list via proxy...');
+    console.log('Parameters:', { customer: adminEmail, maxResults: 5 });
+    
+    // Add timeout to avoid hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Client-side timeout after 30 seconds')), 30000);
     });
+    
+    const resultPromise = gapi.admin.users.list({
+        customer: adminEmail,
+        maxResults: 5
+    });
+    
+    const result = await Promise.race([resultPromise, timeoutPromise]);
 
     console.log('SDK Proxy response (users.list):');
     
@@ -94,24 +124,27 @@ async function runTest() {
 }
 
 async function runDomainTest() {
-  // --- Get Customer ID first ---
-  let customerId: string;
-  try {
-      customerId = await getCustomerId();
-  } catch (error) {
-      console.error("Failed to get Customer ID, aborting domain tests.");
-      return; 
-  }
-  // --- End Get Customer ID ---
-
   console.log('\nTesting wrappedgapi via SDK Proxy (List Domains)...');
 
   try {
-    console.log('Calling gapi.admin.domains.list via proxy with Customer ID...');
-    // Chain: gapi -> admin -> domains -> list
-    const result = await gapi.admin.domains.list({
-        customer: customerId // Use fetched Customer ID
+    if (!adminEmail) {
+      console.warn('No admin email available. Please make sure GAPI_ADMIN_EMAIL is set in the keystore.');
+      return;
+    }
+    
+    console.log('Calling gapi.admin.domains.list via proxy...');
+    console.log('Parameters:', { customer: adminEmail });
+    
+    // Add timeout to avoid hanging
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Client-side timeout after 30 seconds')), 30000);
     });
+    
+    const resultPromise = gapi.admin.domains.list({
+        customer: adminEmail
+    });
+    
+    const result = await Promise.race([resultPromise, timeoutPromise]);
 
     console.log('SDK Proxy response (domains.list):');
 
@@ -139,7 +172,40 @@ async function runDomainTest() {
   }
 }
 
-// Run both tests
-// Run tests sequentially to avoid potential issues with concurrent ID fetching if needed later
-await runTest();
-await runDomainTest(); // Re-enable domain test 
+async function checkGapiCredentials() {
+  try {
+    console.log('\nTesting wrappedgapi checkCredentials method...');
+    const credentialsStatus = await gapi.checkCredentials();
+    console.log('Credentials status:', JSON.stringify(credentialsStatus, null, 2));
+    return credentialsStatus;
+  } catch (error) {
+    console.error('Error checking GAPI credentials:', error);
+    return null;
+  }
+}
+
+// Check credentials and run tests
+(async () => {
+  console.log('=== Google API Integration Test ===');
+  
+  // Add delay before tests to ensure Supabase function is ready
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  
+  // Check keystore first
+  const credentialsExist = await checkKeystore();
+  
+  if (!credentialsExist) {
+    console.log('\n⚠️ Warning: GAPI credentials not found in keystore.');
+    console.log('Please run set-gapi-credentials.ts first to set up credentials.');
+    return; // Exit early if credentials don't exist
+  }
+  
+  // Check credentials in GAPI service
+  await checkGapiCredentials();
+  
+  // Run tests sequentially to avoid issues with concurrent API calls
+  await runUserTest();
+  await runDomainTest();
+  
+  console.log('\n=== Test Complete ===');
+})(); 

@@ -39,7 +39,7 @@ interface MethodChainItem {
   type: string;
   property: string;
   args?: any[];
-}
+  }
 
 // The main function to process a stack run
 async function processStackRun(stackRunId?: string) {
@@ -64,12 +64,12 @@ async function processStackRun(stackRunId?: string) {
         .limit(1);
       
       if (pendingError) {
-        throw new Error(`Error finding pending runs: ${pendingError.message}`);
+        throw new Error(`Error fetching pending runs: ${pendingError.message}`);
       }
       
       if (!pendingRuns || pendingRuns.length === 0) {
-        log("info", "No pending stack runs found, exiting");
-        return { success: true, message: "No pending stack runs found" };
+        log("info", "No pending runs to process");
+        return;
       }
       
       stackRunId = pendingRuns[0].id;
@@ -77,177 +77,291 @@ async function processStackRun(stackRunId?: string) {
     
     log("info", `Processing stack run: ${stackRunId}`);
     
-    // Get the stack run details
-    const { data: stackRun, error: getError } = await supabase
-      .from("stack_runs")
-      .select("*")
-      .eq("id", stackRunId)
-      .single();
+    // Mark as processing to avoid race conditions
+      const { error: updateError } = await supabase
+        .from("stack_runs")
+      .update({
+        status: "processing",
+        updated_at: new Date().toISOString()
+      })
+        .eq("id", stackRunId);
+      
+      if (updateError) {
+      throw new Error(`Error updating stack run to processing: ${updateError.message}`);
+      }
     
-    if (getError) {
-      throw new Error(`Error retrieving stack run: ${getError.message}`);
+    // Fetch the stack run details
+    const { data: stackRun, error: fetchError } = await supabase
+        .from("stack_runs")
+        .select("*")
+        .eq("id", stackRunId)
+      .maybeSingle();
+      
+    if (fetchError) {
+      throw new Error(`Error fetching stack run: ${fetchError.message}`);
     }
     
     if (!stackRun) {
       throw new Error(`Stack run not found: ${stackRunId}`);
     }
     
-    // If the stack run is already completed, just return success
-    if (stackRun.status !== "pending") {
-      log("info", `Stack run ${stackRunId} is already ${stackRun.status}, skipping`);
-      return { success: true, message: `Stack run already ${stackRun.status}` };
-    }
+    // Use either module_name or service_name for compatibility
+    const moduleName = stackRun.module_name || stackRun.service_name || 'unknown';
+    const methodName = stackRun.method_name;
     
-    // Mark the stack run as processing
-      const { error: updateError } = await supabase
-        .from("stack_runs")
-        .update({ status: "processing", updated_at: new Date().toISOString() })
-        .eq("id", stackRunId);
+    log("info", `Stack run fetched: ${moduleName}.${methodName}`);
+    
+    // Process based on module name and method name
+      let result;
       
-      if (updateError) {
-      throw new Error(`Error updating stack run to processing: ${updateError.message}`);
-    }
-    
-    // Extract the details we need for processing
-    const { module_name, service_name, method_name, args, parent_run_id } = stackRun;
-    
-    // Validate required fields - use service_name as fallback for module_name
-    const moduleName = module_name || service_name;
-    
-    if (!moduleName) {
-      throw new Error(`Stack run ${stackRunId} has no module_name or service_name. Full record: ${JSON.stringify(stackRun)}`);
-    }
-    
-    if (!method_name) {
-      throw new Error(`Stack run ${stackRunId} has no method_name. Full record: ${JSON.stringify(stackRun)}`);
-    }
-    
-    log("info", `Stack run fetched: ${moduleName}.${method_name}`);
-    
-    // Process the stack run based on its module and method
-    let result;
-    try {
-      log("info", `Processing ${moduleName}.${method_name} call with${args ? ' args: ' + JSON.stringify(args) : 'out args'}`);
-      
-      // Update the parent task run if it exists
-      if (parent_run_id) {
-        const { error: parentUpdateError } = await supabase
-          .from("task_runs")
-          .update({ status: "processing", updated_at: new Date().toISOString() })
-          .eq("id", parent_run_id);
-        
-        if (parentUpdateError) {
-          log("error", `Error updating parent task run: ${parentUpdateError.message}`);
-          // Continue anyway, this is not fatal
-        } else {
-          log("info", `Parent task run ${parent_run_id} updated successfully`);
-        }
-      }
-      
-      // Execute the appropriate service method
-      if ((moduleName === "tasks" || moduleName === "task") && method_name === "execute") {
-        // For tasks.execute, call the tasks function
-        if (!args || args.length < 1) {
-          throw new Error("No task name provided in args for tasks.execute");
-        }
-        const taskName = args[0];
-        const taskInput = args.length > 1 ? args[1] : {};
-        
-        log("info", `Calling tasks.execute with taskName=${taskName}`);
-        result = await executeTask(taskName, taskInput);
-      } else if (moduleName === "gapi" && method_name === "authenticate") {
-        // Handle gapi.authenticate
-        log("info", `Calling gapi.authenticate with args: ${JSON.stringify(args)}`);
-        result = await callGapi("authenticate", args);
-      } else if (moduleName === "gapi") {
-        // Handle other gapi methods
-        log("info", `Calling gapi.${method_name} with args: ${JSON.stringify(args)}`);
-        result = await callGapi(method_name, args);
+    // Check if this is a task execution
+    if ((moduleName === "tasks" || moduleName === "task") && methodName === "execute") {
+      // Process tasks.execute call
+      log("info", `Processing tasks.execute call with args: ${JSON.stringify(stackRun.args)}`);
+      result = await processTaskExecute(stackRun.args, stackRunId, stackRun.parent_task_run_id || null);
+    } else if (moduleName === "gapi") {
+      // Process GAPI calls
+      // Ensure method is a string and handle the two supported methods explicitly
+      if (methodName === "authenticate") {
+        log("info", `Processing gapi.authenticate call with args: ${JSON.stringify(stackRun.args)}`);
+        result = await callGapi("authenticate", stackRun.args);
+      } else if (methodName === "admin.directory.domains.list") {
+        log("info", `Processing gapi.admin.directory.domains.list call with args: ${JSON.stringify(stackRun.args)}`);
+        result = await callGapi("admin.directory.domains.list", stackRun.args);
       } else {
-        // Handle other service methods
-        log("info", `Calling generic service: ${moduleName}.${method_name} with args: ${JSON.stringify(args)}`);
-        result = await callService(moduleName, method_name, args);
+        // For unknown/unsupported methods, throw a descriptive error
+        const method = methodName || "unknown";
+        log("error", `Unsupported gapi method: ${method}`);
+        throw new Error(`Unsupported gapi method: ${method}`);
+      }
+    } else {
+      // Handle other service modules
+      try {
+        log("info", `Processing ${moduleName}.${methodName} call with service proxy`);
+        result = await callService(moduleName, methodName, stackRun.args);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw new Error(`Unsupported module/method: ${moduleName}.${methodName}: ${errorMessage}`);
+      }
+    }
+    
+    log("info", `Task executed successfully, raw result: ${JSON.stringify(result)}`);
+    
+    // Unwrap the result from the QuickJS response if needed
+    let finalResult = result;
+    if (result && typeof result === 'object') {
+      // Handle both formats returned by QuickJS
+      if (result.result !== undefined) {
+        finalResult = result.result;
+        log("info", `Extracted result from result.result: ${JSON.stringify(finalResult)}`);
+      }
       }
       
-      log("info", `Task executed successfully: ${moduleName}.${method_name}`);
-      
-      // Update the stack run with the successful result
-      const { error: completeError } = await supabase
+    // Update the stack run with the successful result
+    const { error: completeError } = await supabase
           .from("stack_runs")
-        .update({
-          status: "completed",
-          result: result,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", stackRunId);
-      
-      if (completeError) {
-        throw new Error(`Error updating stack run to completed: ${completeError.message}`);
-      }
-      
-      // Update parent task run with result if this is directly called from a task
-      if (parent_run_id) {
-        log("info", `Updating parent task run ${parent_run_id} with result`);
-        
-        const { error: parentResultError } = await supabase
-          .from("task_runs")
           .update({
             status: "completed",
-            result: result,
+        result: finalResult,
             updated_at: new Date().toISOString()
           })
-          .eq("id", parent_run_id);
+          .eq("id", stackRunId);
         
-        if (parentResultError) {
-          log("error", `Error updating parent task run with result: ${parentResultError.message}`);
-          // Continue anyway, this is not fatal
-        } else {
-          log("info", `Parent task run ${parent_run_id} updated successfully`);
-        }
-      }
-      
-      return { success: true, result, message: `Stack run ${stackRunId} processed successfully` };
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      log("error", `Error processing stack run: ${errorMessage}`);
-      
-      // Update the stack run with the error
-      const { error: failError } = await supabase
-        .from("stack_runs")
-        .update({
-          status: "failed",
-          error: errorMessage,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", stackRunId);
-      
-      if (failError) {
-        log("error", `Error updating stack run to failed: ${failError.message}`);
-      }
-      
-      // Update parent task run with the error if it exists
-      if (parent_run_id) {
-        log("error", `Updating parent task run ${parent_run_id} with error: ${errorMessage}`);
-        
-        const { error: parentErrorUpdate } = await supabase
-          .from("task_runs")
-          .update({
-            status: "failed",
-            error: errorMessage,
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", parent_run_id);
-        
-        if (parentErrorUpdate) {
-          log("error", `Error updating parent task run with error: ${parentErrorUpdate.message}`);
-        }
-      }
-      
-      throw new Error(`Error processing stack run: ${errorMessage}`);
+    if (completeError) {
+      throw new Error(`Error updating stack run to completed: ${completeError.message}`);
     }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    log("error", `Error in processStackRun: ${errorMessage}`);
+    
+    // Update any relevant task runs if this was a direct task call
+    if (stackRun && stackRun.parent_task_run_id) {
+      const parentRunId = stackRun.parent_task_run_id;
+      log("info", `Updating parent task run ${parentRunId} with result`);
+      
+      try {
+        // CRITICAL: This update needs to happen correctly for the task to show as completed
+        if (parentRunId) {
+          await updateTaskRun(parentRunId, finalResult);
+          log("info", `Successfully updated parent task run ${parentRunId} with completed status and result`);
+        } else {
+          log("warn", "Parent run ID is defined but empty, skipping update");
+        }
+      } catch (updateError) {
+        const errorMessage = updateError instanceof Error ? updateError.message : String(updateError);
+        log("error", `Failed to update parent task run ${parentRunId}: ${errorMessage}`);
+      
+        // Try a direct update as a fallback
+        try {
+          log("info", `Attempting direct update of task_runs record ${parentRunId}`);
+          const { url, serviceRoleKey } = getSupabaseConfig();
+          
+          if (serviceRoleKey) {
+            const supabase = createClient(url, serviceRoleKey);
+            
+            const { error: directUpdateError } = await supabase
+              .from("task_runs")
+          .update({
+                status: "completed",
+                result: finalResult,
+                updated_at: new Date().toISOString(),
+                ended_at: new Date().toISOString()
+          })
+              .eq("id", parentRunId);
+        
+            if (directUpdateError) {
+              log("error", `Direct update also failed: ${directUpdateError.message}`);
+            } else {
+              log("info", `Direct update of task_runs record ${parentRunId} succeeded`);
+            }
+          }
+        } catch (directError) {
+          log("error", `Exception during direct update: ${directError instanceof Error ? directError.message : String(directError)}`);
+        }
+      }
+    }
+    
+    // Check if this run has a parent stack run that's waiting on it
+    let waitingParents = null;
+    let hasWaitingColumn = false; 
+    
+    // First check if the waiting_on_stack_run_id column exists
+    try {
+      // Check if the column exists by querying the information schema
+      const { data: columnExists, error: columnError } = await supabase
+        .from("information_schema.columns")
+        .select("column_name")
+        .eq("table_name", "stack_runs")
+        .eq("column_name", "waiting_on_stack_run_id")
+        .maybeSingle();
+
+      // If we got data and no error, the column exists
+      if (!columnError && columnExists) {
+        hasWaitingColumn = true;
+        log("info", "waiting_on_stack_run_id column exists in stack_runs table");
+      } else {
+        log("warn", "waiting_on_stack_run_id column does not exist in stack_runs table. Skipping parent run checks.");
+        hasWaitingColumn = false;
+        waitingParents = [];
+      }
+    } catch (columnCheckError: unknown) {
+      const errorMessage = columnCheckError instanceof Error ? columnCheckError.message : String(columnCheckError);
+      log("warn", `Error checking for waiting_on_stack_run_id column: ${errorMessage}`);
+      hasWaitingColumn = false;
+      waitingParents = [];
+    }
+    
+    // Only proceed with the waiting parents check if the column exists
+    if (hasWaitingColumn) {
+      try {
+        const { data: fetchedParents, error: waitingError } = await supabase
+          .from("stack_runs")
+          .select("id")
+          .eq("waiting_on_stack_run_id", stackRunId)
+          .eq("status", "suspended_waiting_child");
+        
+        if (!waitingError) {
+          waitingParents = fetchedParents;
+        } else {
+          log("error", `Error checking for waiting parent runs: ${waitingError.message}`);
+          waitingParents = [];
+        }
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log("error", `Exception checking for waiting parent runs: ${errorMessage}`);
+        waitingParents = [];
+      }
+    }
+    
+    // If we have waiting parents, resume them
+    if (waitingParents && waitingParents.length > 0) {
+      const parentStackRunId = waitingParents[0].id;
+      
+      if (!parentStackRunId) {
+        log("warn", "Parent stack run ID is undefined, skipping resumption");
+        return finalResult;
+      }
+      
+      log("info", `Found parent stack run ${parentStackRunId} waiting on this run, preparing resumption`);
+      
+      try {
+        // Prepare parent for resumption with this result
+        const updateData: Record<string, any> = {
+          status: "pending_resume",
+          result: finalResult,
+          updated_at: new Date().toISOString()
+        };
+        
+        // Only add resume_payload and waiting_on_stack_run_id if the columns exist
+        try {
+          updateData.resume_payload = finalResult;
+          if (hasWaitingColumn) {
+            updateData.waiting_on_stack_run_id = null;
+          }
+        } catch (e) {
+          log("warn", "Could not set some fields, columns may not exist");
+        }
+        
+        const { error: resumeError } = await supabase
+          .from("stack_runs")
+          .update(updateData)
+          .eq("id", parentStackRunId);
+        
+        if (resumeError) {
+          log("error", `Error updating parent for resumption: ${resumeError.message}`);
+        } else {
+          log("info", `Parent stack run ${parentStackRunId} marked for resumption with our result`);
+          
+          // Immediately process the parent stack run to continue execution
+          return await processStackRun(parentStackRunId);
+        }
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        log("error", `Exception updating parent for resumption: ${errorMessage}`);
+      }
+    }
+    
+    // Check for more pending runs
+    const { data: nextPendingRun, error: nextError } = await supabase
+      .from("stack_runs")
+      .select("id")
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+      
+    if (nextError) {
+      log("error", `Error checking for more pending runs: ${nextError.message}`);
+    } else if (nextPendingRun) {
+      log("info", `Found another pending run: ${nextPendingRun.id}, processing...`);
+      return await processStackRun(nextPendingRun.id);
+      } else {
+      log("info", "No more pending runs to process");
+      }
+      
+    return finalResult;
+    } catch (error) {
+    log("error", `Error processing stack run: ${error instanceof Error ? error.message : String(error)}`);
+      
+    // If we have a stack run ID, update it to failed
+    if (stackRunId) {
+      try {
+        const { url, serviceRoleKey } = getSupabaseConfig();
+        
+        if (serviceRoleKey) {
+          const supabase = createClient(url, serviceRoleKey);
+          
+          await supabase
+            .from("stack_runs")
+            .update({
+              status: "failed",
+              error: { message: error instanceof Error ? error.message : String(error) },
+              updated_at: new Date().toISOString()
+            })
+            .eq("id", stackRunId);
+        }
+      } catch (updateError) {
+        log("error", `Failed to update stack run status after error: ${updateError instanceof Error ? updateError.message : String(updateError)}`);
+      }
+    }
+    
     throw error;
   }
 }
@@ -264,7 +378,7 @@ async function executeTask(taskName: string, input: any): Promise<any> {
   
   // Prepare the QuickJS function call
   log("info", `Using quickjs URL: ${url}/functions/v1/quickjs`);
-  
+    
   // Generate stack run ID for this QuickJS execution
   const stackRunId = crypto.randomUUID();
   
@@ -283,10 +397,10 @@ async function executeTask(taskName: string, input: any): Promise<any> {
         "Authorization": `Bearer ${serviceRoleKey}`
       },
       body: JSON.stringify({
-        direct: true,
+        directExecution: true,
         taskName: taskName,
         stackRunId: stackRunId,
-        input: input
+        taskInput: input
       })
     });
     
@@ -301,15 +415,15 @@ async function executeTask(taskName: string, input: any): Promise<any> {
       throw new Error(`Task executed with error: ${result.error}`);
     }
     
-    log("info", `Task executed successfully: ${JSON.stringify(result.result || {})}`);
+    log("info", `Task executed successfully, raw result: ${JSON.stringify(result)}`);
     
     // Return the unwrapped result
-    return result.result;
+    return result.result || result;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error executing task: ${errorMessage}`);
     throw new Error(`Task execution failed: ${errorMessage}`);
-  }
+        }
 }
 
 // Helper function to call gapi services
@@ -350,7 +464,7 @@ async function callGapi(method: string, args: any[]): Promise<any> {
     
     const result = await response.json();
     return result;
-  } catch (error) {
+  } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error calling gapi.${method}: ${errorMessage}`);
     throw new Error(`gapi.${method} call failed: ${errorMessage}`);
@@ -442,7 +556,7 @@ async function processNextPendingRun(): Promise<void> {
       
       // Trigger the next run by calling this function again
       const { url, serviceRoleKey } = getSupabaseConfig();
-      
+    
       if (!serviceRoleKey) {
         throw new Error("Missing service role key");
       }
@@ -461,6 +575,143 @@ async function processNextPendingRun(): Promise<void> {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error processing next pending run: ${errorMessage}`);
+  }
+}
+
+// Helper function to update a task run with the final result
+async function updateTaskRun(taskRunId: string, result: any, status: string = 'completed'): Promise<void> {
+  if (!taskRunId) {
+    log("warn", "No task run ID provided to update");
+    return;
+  }
+  
+  try {
+    const { url, serviceRoleKey } = getSupabaseConfig();
+    
+    if (!serviceRoleKey) {
+      throw new Error("Missing service role key");
+    }
+    
+    const supabase = createClient(url, serviceRoleKey);
+    
+    log("info", `Updating task run ${taskRunId} with status ${status}`);
+    
+    const { error } = await supabase
+      .from('task_runs')
+      .update({
+        status,
+        result,
+        updated_at: new Date().toISOString(),
+        ended_at: new Date().toISOString()
+      })
+      .eq('id', taskRunId);
+    
+    if (error) {
+      log("error", `Error updating task run ${taskRunId}: ${error.message}`);
+    } else {
+      log("info", `Task run ${taskRunId} updated successfully`);
+    }
+  } catch (error) {
+    log("error", `Exception updating task run ${taskRunId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Special handler for tasks.execute calls
+async function processTaskExecute(args: any[], stackRunId: string, parent_task_run_id?: string | null): Promise<any> {
+  const [taskName, taskInput] = args;
+  log("info", `Calling tasks.execute with taskName=${taskName}`);
+  
+  try {
+    const result = await executeTask(taskName, taskInput);
+    log("info", `Task executed successfully, raw result: ${JSON.stringify(result)}`);
+    
+    // Extract the actual result from the response
+    let finalResult = result;
+    if (result && typeof result === 'object') {
+      // Handle both formats returned by QuickJS
+      if (result.result !== undefined) {
+        finalResult = result.result;
+        log("info", `Extracted result from result.result: ${JSON.stringify(finalResult)}`);
+      }
+    }
+    
+    // If this task was triggered from a task_run record, update its status directly
+    if (parent_task_run_id) {
+      try {
+        const { url, serviceRoleKey } = getSupabaseConfig();
+        if (!serviceRoleKey) {
+          log("error", "Missing service role key, cannot update parent task run");
+        } else {
+          const supabase = createClient(url, serviceRoleKey);
+          
+          log("info", `Directly updating task_runs record ${parent_task_run_id} with completed status and result`);
+          
+          // CRITICAL: This is the most important step - updating the task_run record to completed
+          const { error: taskRunUpdateError } = await supabase
+      .from("task_runs")
+      .update({
+              status: "completed",
+              result: finalResult,
+              updated_at: new Date().toISOString(),
+              ended_at: new Date().toISOString()
+      })
+            .eq("id", parent_task_run_id);
+    
+          if (taskRunUpdateError) {
+            log("error", `Error updating task_runs record: ${taskRunUpdateError.message}`);
+          } else {
+            log("info", `Successfully updated task_runs record ${parent_task_run_id} with status 'completed'`);
+          }
+        }
+      } catch (updateError: unknown) {
+        const errorMessage = updateError instanceof Error ? updateError.message : String(updateError);
+        log("error", `Exception updating task_runs record: ${errorMessage}`);
+        // Don't throw here, we still want to return the result
+      }
+    } else {
+      log("warn", "No parent_task_run_id provided, cannot update task_runs record");
+    }
+    
+    // Return the unwrapped result
+    return finalResult;
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log("error", `Error executing task: ${errorMessage}`);
+    
+    // If this task was triggered from a task_run record, update its status to failed
+    if (parent_task_run_id) {
+      try {
+        const { url, serviceRoleKey } = getSupabaseConfig();
+        if (!serviceRoleKey) {
+          log("error", "Missing service role key, cannot update parent task run");
+        } else {
+          const supabase = createClient(url, serviceRoleKey);
+          
+          log("info", `Directly updating task_runs record ${parent_task_run_id} with failed status`);
+          
+          const { error: taskRunUpdateError } = await supabase
+            .from("task_runs")
+            .update({
+              status: "failed",
+              error: { message: errorMessage },
+              updated_at: new Date().toISOString(),
+              ended_at: new Date().toISOString()
+            })
+            .eq("id", parent_task_run_id);
+    
+          if (taskRunUpdateError) {
+            log("error", `Error updating task_runs record: ${taskRunUpdateError.message}`);
+          } else {
+            log("info", `Successfully updated task_runs record ${parent_task_run_id} with status 'failed'`);
+          }
+        }
+      } catch (updateError: unknown) {
+        const errorMessage = updateError instanceof Error ? updateError.message : String(updateError);
+        log("error", `Exception updating task_runs record: ${errorMessage}`);
+      }
+    }
+    
+    throw new Error(`Task execution failed: ${errorMessage}`);
   }
 }
 

@@ -52,7 +52,6 @@ type Task = {
   description: string;
   code: string;
   schema: Record<string, unknown>;
-  file_path: string;
   parameters: TaskParameter[];
   returns: TaskReturn;
 };
@@ -72,7 +71,7 @@ function parseTaskMetadata(code: string): TaskMetadata {
   }
   
   const jsdocContent = jsdocMatches[0];
-  
+
   // Extract task name from @task tag
   const taskNameMatch = /@task\s+([a-zA-Z0-9_-]+)/.exec(jsdocContent);
   const taskName = taskNameMatch ? taskNameMatch[1] : null;
@@ -101,9 +100,9 @@ function parseTaskMetadata(code: string): TaskMetadata {
       type,
       description,
       required: !isOptional,
-    });
-  }
-  
+  });
+}
+
   // Extract return type from @returns tag
   const returnsMatch = /@returns\s+\{([^}]+)\}\s*(.*?)(?=\s*@|\s*\*\/)/.exec(jsdocContent);
   const returnType = returnsMatch ? returnsMatch[1].trim() : "any";
@@ -118,7 +117,7 @@ function parseTaskMetadata(code: string): TaskMetadata {
       description: returnDescription,
     },
   };
-}
+  }
 
 /**
  * Generate a JSON Schema for task parameters
@@ -172,8 +171,8 @@ function generateJsonSchema(taskMetadata: TaskMetadata): Record<string, unknown>
     // Add to required list if necessary
     if (param.required) {
       schema.required.push(param.name);
-    }
-  }
+          }
+        }
   
   return schema;
 }
@@ -189,8 +188,8 @@ async function findTaskFiles(): Promise<string[]> {
   for await (const entry of walk(endpointsDir, { exts: [".js"] })) {
     if (entry.isFile) {
       files.push(entry.path);
-    }
-  }
+          }
+        }
   
   return files;
 }
@@ -210,7 +209,6 @@ async function readTaskFile(filePath: string): Promise<Task> {
     description: metadata.description,
     code,
     schema,
-    file_path: filePath,
     parameters: metadata.parameters,
     returns: metadata.returns,
   };
@@ -238,22 +236,21 @@ async function publishTask(task: Task): Promise<{ action: string; name: string }
   // Update or insert the task
   if (existingTask) {
     console.log(`Updating existing task: ${task.name}`);
-    
+
     const { error: updateError } = await supabase
       .from("task_functions")
       .update({
         description: task.description,
         code: task.code,
         schema: task.schema,
-        file_path: task.file_path,
         updated_at: new Date().toISOString(),
       })
       .eq("name", task.name);
-    
+
     if (updateError) {
       throw new Error(`Error updating task: ${updateError.message}`);
-    }
-    
+  }
+
     return { action: "updated", name: task.name };
   } else {
     console.log(`Creating new task: ${task.name}`);
@@ -265,7 +262,6 @@ async function publishTask(task: Task): Promise<{ action: string; name: string }
         description: task.description,
         code: task.code,
         schema: task.schema,
-        file_path: task.file_path,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
@@ -275,7 +271,7 @@ async function publishTask(task: Task): Promise<{ action: string; name: string }
     }
     
     return { action: "created", name: task.name };
-  }
+}
 }
 
 /**
@@ -283,11 +279,11 @@ async function publishTask(task: Task): Promise<{ action: string; name: string }
  */
 async function listTasks(): Promise<void> {
   console.log("Listing tasks in the database...");
-  
+
   const { data: tasks, error } = await supabase
     .from("task_functions")
     .select("id, name, description, created_at, updated_at");
-  
+
   if (error) {
     throw new Error(`Error listing tasks: ${error.message}`);
   }
@@ -306,7 +302,7 @@ async function listTasks(): Promise<void> {
     const created = new Date(task.created_at).toISOString().split("T")[0];
     const updated = new Date(task.updated_at).toISOString().split("T")[0];
     console.log(`| ${task.id} | ${task.name} | ${task.description.substring(0, 30)}... | ${created} | ${updated} |`);
-  }
+    }
   
   console.log("------------------------------------------------------");
 }
@@ -354,7 +350,7 @@ async function main(): Promise<void> {
       console.log(`Task ${result.name} ${result.action} successfully.`);
       Deno.exit(0);
     }
-    
+
     // Handle --all flag
     if (args.all) {
       console.log("Publishing all tasks...");
@@ -362,7 +358,7 @@ async function main(): Promise<void> {
       const results: { action: string; name: string }[] = [];
       
       for (const file of taskFiles) {
-        try {
+      try {
           const task = await readTaskFile(file);
           const result = await publishTask(task);
           results.push(result);
@@ -370,9 +366,9 @@ async function main(): Promise<void> {
         } catch (error: unknown) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`Error processing ${file}: ${errorMessage}`);
-        }
       }
-      
+    }
+
       console.log(`Published ${results.length} tasks successfully.`);
       Deno.exit(0);
     }
