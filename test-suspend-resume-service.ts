@@ -102,4 +102,21 @@ async function testGapiDomainsSuspendResume() {
           console.log(`Task status: ${statusData.status} - continuing to poll...`);
         }
       } else {
-        console.log(`Error checking status: ${statusResponse.status}`)
+        console.log(`Error checking status: ${statusResponse.status}`);
+      }
+    }
+    
+    if (taskResult?.status === 'completed' && taskResult?.result?.domains) {
+      console.log("\n✅ The GAPI domains suspend/resume functionality is working properly!");
+      console.log(`Successfully retrieved ${taskResult.result.domainCount || taskResult.result.domains.length} domains`);
+    } else {
+      throw new Error("Task did not complete successfully or no domains were returned");
+    }
+    
+  } catch (error) {
+    console.error(`Test failed: ${error}`);
+    Deno.exit(1);
+  }
+}
+
+testGapiDomainsSuspendResume(); 
