@@ -47,3 +47,50 @@ module.exports = async function execute(input, { tools }) {
     throw new Error(`Failed to insert record: ${error.message}`);
   }
 }
+
+/**
+ * Task to manually insert a test record into the stack_runs table
+ * @param {Object} input - Input parameters
+ * @param {string} input.service_name - Service name (e.g., 'tasks')
+ * @param {string} input.method_name - Method name (e.g., 'execute')
+ * @param {Array} input.args - Method arguments
+ * @returns {Object} Result with inserted stack run ID
+ */
+export default async function insertStackRun(input) {
+  console.log(`Inserting test stack run for ${input.service_name}.${input.method_name}`);
+  
+  // Default values if not provided
+  const service = input.service_name || 'tasks';
+  const method = input.method_name || 'execute';
+  const args = input.args || ['hello-world', { name: 'Test User' }];
+  
+  try {
+    // Insert a new record into stack_runs table
+    const result = await tools.database.from('stack_runs')
+      .insert({
+        service_name: service,
+        method_name: method,
+        args: args,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+    
+    console.log(`Stack run created with ID: ${result.data?.id}`);
+    
+    return {
+      success: true,
+      stack_run_id: result.data?.id,
+      message: 'Stack run created successfully'
+    };
+  } catch (error) {
+    console.error(`Error inserting stack run: ${error.message}`);
+    
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}

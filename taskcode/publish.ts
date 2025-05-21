@@ -1,394 +1,202 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env --allow-read
+#!/usr/bin/env -S deno run --allow-read --allow-net --allow-env
 
-// Task publisher script for Tasker
-// This script discovers and publishes task functions to the Supabase database
+import * as path from "https://deno.land/std@0.201.0/path/mod.ts";
+import * as fs from "https://deno.land/std@0.201.0/fs/mod.ts";
+import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
+import { load } from "https://deno.land/std@0.201.0/dotenv/mod.ts";
 
-import { parse as parseArgs } from "https://deno.land/std/flags/mod.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { join, basename } from "https://deno.land/std/path/mod.ts";
-import { walk } from "https://deno.land/std/fs/mod.ts";
-
-// Parse command line arguments
-const args = parseArgs(Deno.args, {
-  boolean: ["all", "list"],
-  string: ["specific"],
-  default: { all: false, list: false, specific: "" },
-});
-
-// Get Supabase credentials
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "http://localhost:54321";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-if (!SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("Error: SUPABASE_SERVICE_ROLE_KEY environment variable is required");
-  Deno.exit(1);
-}
-
-// Initialize Supabase client
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-// Define types for task metadata
-type TaskParameter = {
-  name: string;
-  type: string;
-  description: string;
-  required: boolean;
-};
-
-type TaskReturn = {
-  type: string;
-  description: string;
-};
-
-type TaskMetadata = {
-  name: string;
-  description: string;
-  parameters: TaskParameter[];
-  returns: TaskReturn;
-};
+// Load environment variables from .env file
+await load({ export: true });
 
 type Task = {
   name: string;
-  description: string;
+  description?: string;
   code: string;
-  schema: Record<string, unknown>;
-  parameters: TaskParameter[];
-  returns: TaskReturn;
 };
 
-/**
- * Extract JSDoc comments and metadata from task code
- * @param code The task code content
- * @returns Parsed task metadata
- */
-function parseTaskMetadata(code: string): TaskMetadata {
-  // Find JSDoc comments
-  const jsdocRegex = /\/\*\*\s*([\s\S]*?)\s*\*\//g;
-  const jsdocMatches = code.match(jsdocRegex);
-  
-  if (!jsdocMatches || jsdocMatches.length === 0) {
-    throw new Error("No JSDoc comments found in task code");
+const args = {
+  all: Deno.args.includes("--all"),
+  specific: Deno.args.includes("--specific"),
+  list: Deno.args.includes("--list"),
+  getSpecificTasks: () => {
+    const index = Deno.args.indexOf("--specific");
+    if (index === -1) return [];
+    return Deno.args.slice(index + 1).filter(arg => !arg.startsWith("--"));
   }
-  
-  const jsdocContent = jsdocMatches[0];
+};
 
-  // Extract task name from @task tag
-  const taskNameMatch = /@task\s+([a-zA-Z0-9_-]+)/.exec(jsdocContent);
-  const taskName = taskNameMatch ? taskNameMatch[1] : null;
-  
-  if (!taskName) {
-    throw new Error("Task name not found in JSDoc @task tag");
+// Simple logger
+const logger = {
+  info: (message: string) => console.log(`[INFO] ${message}`),
+  error: (message: string, error?: Error) => {
+    console.error(`[ERROR] ${message}`);
+    if (error?.stack) console.error(error.stack);
   }
-  
-  // Extract description from @description tag
-  const descriptionMatch = /@description\s+(.*?)(?=\s*@|\s*\*\/)/.exec(jsdocContent);
-  const description = descriptionMatch ? descriptionMatch[1].trim() : "";
-  
-  // Extract parameters from @param tags
-  const paramRegex = /@param\s+\{([^}]+)\}\s+(\[?[a-zA-Z0-9_.]+\]?)\s*-?\s*(.*?)(?=\s*@|\s*\*\/)/g;
-  let paramMatch;
-  const params: TaskParameter[] = [];
-  
-  while ((paramMatch = paramRegex.exec(jsdocContent)) !== null) {
-    const type = paramMatch[1].trim();
-    const name = paramMatch[2].trim().replace(/^\[|\]$/g, ""); // Remove brackets from optional params
-    const description = paramMatch[3].trim();
-    const isOptional = paramMatch[2].includes("[");
-    
-    params.push({
-      name,
-      type,
-      description,
-      required: !isOptional,
+};
+
+// Simple config
+const CONFIG = {
+  SUPABASE_URL: Deno.env.get("SUPABASE_URL") || Deno.env.get("EXT_SUPABASE_URL") || "http://127.0.0.1:8000",
+  SUPABASE_SERVICE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
+  TASK_DIRS: [
+    Deno.env.get("TASKS_DIRECTORY") ? `${Deno.env.get("TASKS_DIRECTORY")}/endpoints/` : "./endpoints/"
+  ]
+};
+
+function createSupabaseClient() {
+  const supabaseUrl = CONFIG.SUPABASE_URL;
+  const supabaseServiceKey = CONFIG.SUPABASE_SERVICE_KEY;
+
+  if (!supabaseUrl) throw new Error("SUPABASE_URL environment variable is required");
+  if (!supabaseServiceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY environment variable is required");
+
+  logger.info("Creating Supabase client with service role...");
+
+  return createServiceProxy('supabase', {
+    baseUrl: `${supabaseUrl}/functions/v1/wrappedsupabase`,
+    headers: {
+      'Authorization': `Bearer ${supabaseServiceKey}`,
+      'apikey': supabaseServiceKey
+    }
   });
 }
 
-  // Extract return type from @returns tag
-  const returnsMatch = /@returns\s+\{([^}]+)\}\s*(.*?)(?=\s*@|\s*\*\/)/.exec(jsdocContent);
-  const returnType = returnsMatch ? returnsMatch[1].trim() : "any";
-  const returnDescription = returnsMatch ? returnsMatch[2].trim() : "";
-  
-  return {
-    name: taskName,
-    description,
-    parameters: params,
-    returns: {
-      type: returnType,
-      description: returnDescription,
-    },
-  };
+function extractDescription(fileContent: string, taskName = ""): string {
+  const jsdocMatch = fileContent.match(/\/\*\*[\s\S]*?\*\//);
+  if (jsdocMatch) {
+    const rawDescription = jsdocMatch[0].replace(/\/\*\*|\*\//g, "");
+    const description = rawDescription
+      .split("\n")
+      .map((line: string) => line.trim().replace(/^\s*\*\s*/, ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    return description;
   }
+  return taskName ? `Task: ${taskName}` : "Task function";
+}
 
-/**
- * Generate a JSON Schema for task parameters
- * @param taskMetadata Parsed task metadata
- * @returns JSON Schema object
- */
-function generateJsonSchema(taskMetadata: TaskMetadata): Record<string, unknown> {
-  const schema = {
-    type: "object",
-    required: [] as string[],
-    properties: {} as Record<string, unknown>,
-    additionalProperties: false,
-  };
-  
-  for (const param of taskMetadata.parameters) {
-    let paramSchema: Record<string, unknown> = {};
-    
-    // Convert JSDoc type to JSON Schema type
-    switch (param.type.toLowerCase()) {
-      case "string":
-        paramSchema.type = "string";
-        break;
-      case "number":
-        paramSchema.type = "number";
-        break;
-      case "boolean":
-        paramSchema.type = "boolean";
-        break;
-      case "array":
-        paramSchema.type = "array";
-        break;
-      case "object":
-        paramSchema.type = "object";
-        break;
-      default:
-        if (param.type.startsWith("Array<")) {
-          paramSchema.type = "array";
-        } else if (param.type.includes("|")) {
-          paramSchema.type = param.type.split("|").map((t: string) => t.trim().toLowerCase());
-        } else {
-          paramSchema.type = "object";
+async function discoverTasks(): Promise<string[]> {
+  const taskFiles: string[] = [];
+  const specificTasks = args.getSpecificTasks();
+
+  if (args.specific && specificTasks.length > 0) {
+    logger.info(`Looking for specific tasks: ${specificTasks.join(", ")}`);
+    for (const dir of CONFIG.TASK_DIRS) {
+      if (await fs.exists(dir)) {
+        for (const taskName of specificTasks) {
+          const jsFilePath = path.join(dir, `${taskName}.js`);
+          if (await fs.exists(jsFilePath)) {
+            taskFiles.push(jsFilePath);
+          }
         }
+      }
     }
-    
-    // Add description and required flag
-    paramSchema.description = param.description;
-    
-    // Add the parameter to the schema
-    schema.properties[param.name] = paramSchema;
-    
-    // Add to required list if necessary
-    if (param.required) {
-      schema.required.push(param.name);
-          }
-        }
-  
-  return schema;
-}
-
-/**
- * Find task files in the taskcode/endpoints directory
- * @returns Array of task file paths
- */
-async function findTaskFiles(): Promise<string[]> {
-  const endpointsDir = join(Deno.cwd(), "taskcode", "endpoints");
-  const files: string[] = [];
-  
-  for await (const entry of walk(endpointsDir, { exts: [".js"] })) {
-    if (entry.isFile) {
-      files.push(entry.path);
-          }
-        }
-  
-  return files;
-}
-
-/**
- * Read a task file and extract its code and metadata
- * @param filePath Path to the task file
- * @returns Task object with code and metadata
- */
-async function readTaskFile(filePath: string): Promise<Task> {
-  const code = await Deno.readTextFile(filePath);
-  const metadata = parseTaskMetadata(code);
-  const schema = generateJsonSchema(metadata);
-  
-  return {
-    name: metadata.name,
-    description: metadata.description,
-    code,
-    schema,
-    parameters: metadata.parameters,
-    returns: metadata.returns,
-  };
-}
-
-/**
- * Publish a task to the Supabase database
- * @param task Task object with code and metadata
- * @returns Result of the database operation
- */
-async function publishTask(task: Task): Promise<{ action: string; name: string }> {
-  console.log(`Publishing task: ${task.name}`);
-  
-  // Check if task already exists
-  const { data: existingTask, error: selectError } = await supabase
-    .from("task_functions")
-    .select("id")
-    .eq("name", task.name)
-    .maybeSingle();
-  
-  if (selectError) {
-    throw new Error(`Error checking if task exists: ${selectError.message}`);
-  }
-  
-  // Update or insert the task
-  if (existingTask) {
-    console.log(`Updating existing task: ${task.name}`);
-
-    const { error: updateError } = await supabase
-      .from("task_functions")
-      .update({
-        description: task.description,
-        code: task.code,
-        schema: task.schema,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("name", task.name);
-
-    if (updateError) {
-      throw new Error(`Error updating task: ${updateError.message}`);
-  }
-
-    return { action: "updated", name: task.name };
   } else {
-    console.log(`Creating new task: ${task.name}`);
-    
-    const { error: insertError } = await supabase
-      .from("task_functions")
-      .insert({
-        name: task.name,
-        description: task.description,
-        code: task.code,
-        schema: task.schema,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-    
-    if (insertError) {
-      throw new Error(`Error inserting task: ${insertError.message}`);
+    for (const dir of CONFIG.TASK_DIRS) {
+      if (await fs.exists(dir)) {
+        for await (const entry of Deno.readDir(dir)) {
+          if (entry.isFile && entry.name.endsWith(".js")) {
+            taskFiles.push(path.join(dir, entry.name));
+          }
+        }
+      }
     }
-    
-    return { action: "created", name: task.name };
-}
-}
-
-/**
- * List all tasks in the database
- */
-async function listTasks(): Promise<void> {
-  console.log("Listing tasks in the database...");
-
-  const { data: tasks, error } = await supabase
-    .from("task_functions")
-    .select("id, name, description, created_at, updated_at");
-
-  if (error) {
-    throw new Error(`Error listing tasks: ${error.message}`);
   }
+
+  logger.info(`Discovered ${taskFiles.length} task files`);
+  return taskFiles;
+}
+
+async function publishTask(client: any, filePath: string): Promise<boolean> {
+  const fileContent = await Deno.readTextFile(filePath);
+  const fileName = path.basename(filePath);
+  const taskName = fileName.replace(/\.js$/, "");
+  const description = extractDescription(fileContent, taskName);
+
+  logger.info(`Publishing task: ${taskName}`);
+  
+  const payload = {
+    name: taskName,
+    code: fileContent,
+    description: description
+  };
+
+  const result = await client.from('task_functions')
+    .upsert([payload], { onConflict: 'name' });
+
+  if (result?.error) {
+    throw new Error(`Error upserting task: ${result.error.message}`);
+  }
+
+  logger.info(`Task ${taskName} published successfully`);
+  return true;
+}
+
+async function listTasks(): Promise<Task[]> {
+  logger.info("Listing tasks...");
+  const client = createSupabaseClient();
+
+  const result = await client.from('task_functions')
+    .select('name, description')
+    .order('name', { ascending: true });
+
+  if (result.error) {
+    throw new Error(`Error fetching tasks: ${result.error.message}`);
+  }
+
+  const tasks = result.data || [];
 
   if (!tasks || tasks.length === 0) {
-    console.log("No tasks found in the database.");
-    return;
-  }
-  
-  console.log(`Found ${tasks.length} tasks:`);
-  console.log("------------------------------------------------------");
-  console.log("| ID | Name | Description | Created | Updated |");
-  console.log("------------------------------------------------------");
-  
+    logger.info("No tasks found in the database");
+  } else {
+    logger.info(`Found ${tasks.length} tasks in the database:`);
     for (const task of tasks) {
-    const created = new Date(task.created_at).toISOString().split("T")[0];
-    const updated = new Date(task.updated_at).toISOString().split("T")[0];
-    console.log(`| ${task.id} | ${task.name} | ${task.description.substring(0, 30)}... | ${created} | ${updated} |`);
+      const description = task.description?.split("\n")[0]?.substring(0, 50) || "No description";
+      console.log(`- ${task.name}\n  ${description}...`);
     }
-  
-  console.log("------------------------------------------------------");
+  }
+
+  return tasks;
 }
 
-/**
- * Main function to run the publish script
- */
-async function main(): Promise<void> {
+async function main() {
   try {
-    console.log("Tasker Task Publisher");
-    console.log("=====================");
-    
-    // Handle --list flag
+    logger.info("Waiting for 3 seconds before starting...");
+    await new Promise(resolve => setTimeout(resolve, 3000)); // Add 3-second delay
+
     if (args.list) {
       await listTasks();
-      Deno.exit(0);
+      return;
     }
 
-    // Find task files
-    const taskFiles = await findTaskFiles();
-    console.log(`Found ${taskFiles.length} task files in taskcode/endpoints/`);
+    const client = createSupabaseClient();
+    const taskFiles = await discoverTasks();
 
     if (taskFiles.length === 0) {
-      console.log("No task files found.");
-      Deno.exit(0);
-    }
-    
-    // Handle --specific flag
-    if (args.specific) {
-      const specificTaskName = args.specific;
-      console.log(`Publishing specific task: ${specificTaskName}`);
-      
-      const matchingFile = taskFiles.find(file => {
-        const fileName = basename(file, ".js");
-        return fileName === specificTaskName;
-      });
-      
-      if (!matchingFile) {
-        console.error(`Error: Task file for '${specificTaskName}' not found.`);
-        Deno.exit(1);
-      }
-      
-      const task = await readTaskFile(matchingFile);
-      const result = await publishTask(task);
-      console.log(`Task ${result.name} ${result.action} successfully.`);
-      Deno.exit(0);
+      logger.info("No task files found. Nothing to publish.");
+      return;
     }
 
-    // Handle --all flag
-    if (args.all) {
-      console.log("Publishing all tasks...");
-      
-      const results: { action: string; name: string }[] = [];
-      
-      for (const file of taskFiles) {
+    let publishedCount = 0;
+    for (const filePath of taskFiles) {
       try {
-          const task = await readTaskFile(file);
-          const result = await publishTask(task);
-          results.push(result);
-          console.log(`Task ${result.name} ${result.action} successfully.`);
-        } catch (error: unknown) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          console.error(`Error processing ${file}: ${errorMessage}`);
+        await publishTask(client, filePath);
+        publishedCount++;
+      } catch (error) {
+        logger.error(`Failed to publish ${filePath}: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error : undefined);
       }
     }
 
-      console.log(`Published ${results.length} tasks successfully.`);
-      Deno.exit(0);
-    }
+    logger.info(`Published ${publishedCount} of ${taskFiles.length} tasks successfully`);
     
-    // If no flags are specified, show usage information
-    console.log("Usage:");
-    console.log("  --all        Publish all tasks");
-    console.log("  --specific   Publish a specific task by name");
-    console.log("  --list       List all tasks in the database");
-    console.log("");
-    console.log("Examples:");
-    console.log("  deno run --allow-net --allow-env --allow-read taskcode/publish.ts --all");
-    console.log("  deno run --allow-net --allow-env --allow-read taskcode/publish.ts --specific module-diagnostic");
-    console.log("  deno run --allow-net --allow-env --allow-read taskcode/publish.ts --list");
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`Error: ${errorMessage}`);
+    if (publishedCount < taskFiles.length) {
+      throw new Error(`Failed to publish ${taskFiles.length - publishedCount} tasks`);
+    }
+  } catch (error) {
+    logger.error(`Task publishing failed: ${error instanceof Error ? error.message : String(error)}`, error instanceof Error ? error : undefined);
     Deno.exit(1);
   }
 }
 
-// Run the main function
-await main();
+main();

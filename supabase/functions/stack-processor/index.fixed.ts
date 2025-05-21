@@ -3,8 +3,8 @@
 // This edge function is triggered when a new pending stack run is created
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.1";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.36.0";
 import { corsHeaders } from "../_shared/cors.ts";
 import { 
   prepareStackRunResumption, 
@@ -53,7 +53,7 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 async function getStackRun(stackRunId: string): Promise<any> {
   try {
     const { data, error } = await supabase
-        .from("stack_runs")
+      .from("stack_runs")
       .select("*")
       .eq("id", stackRunId)
       .single();
@@ -78,7 +78,7 @@ async function updateStackRunStatus(stackRunId: string, status: string, result: 
     
     const updateData: any = {
       status,
-        updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString()
     };
     
     // Add started_at timestamp if we're just starting processing
@@ -108,11 +108,11 @@ async function updateStackRunStatus(stackRunId: string, status: string, result: 
     
     if (updateError) {
       log("error", `Error updating stack run ${stackRunId} status: ${updateError.message}`);
-      } else {
+    } else {
       log("info", `Stack run ${stackRunId} status updated to ${status}`);
     }
   } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Exception updating stack run ${stackRunId} status: ${errorMessage}`);
   }
 }
@@ -124,10 +124,10 @@ async function updateStackRunWaitingOn(stackRunId: string, waitingOnStackRunId: 
     
     const { error } = await supabase
       .from('stack_runs')
-          .update({
+      .update({
         waiting_on_stack_run_id: waitingOnStackRunId,
-            updated_at: new Date().toISOString()
-          })
+        updated_at: new Date().toISOString()
+      })
       .eq('id', stackRunId);
     
     if (error) {
@@ -191,10 +191,10 @@ async function processStackRun(stackRunId: string): Promise<any> {
       // Task VM execution
       log("info", `Identified task VM execution for: ${stackRun.vm_state.task_name || 'unknown task'}`);
       result = await processTaskExecution(stackRun);
-            } else {
+    } else {
       // Generic service call
       log("info", `Identified generic service call: ${stackRun.service_name}.${stackRun.method_name}`);
-      result = await processGenericCall(stackRun);
+      result = await processServiceCall(stackRun);
     }
     
     // Update stack run status to completed with result
@@ -285,7 +285,7 @@ async function processTaskExecution(stackRun: any): Promise<any> {
     
     return result;
   } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error executing task: ${errorMessage}`);
     throw error;
   }
@@ -326,7 +326,7 @@ async function processServiceCall(stackRun: any): Promise<any> {
     log("info", `Service call result: ${JSON.stringify(result)}`);
     
     return result;
-    } catch (error) {
+  } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error calling service ${serviceName}.${methodName}: ${errorMessage}`);
     throw error;
@@ -801,7 +801,7 @@ async function processGapiCall(stackRun: any): Promise<any> {
     log("error", `Error processing GAPI call: ${errorMessage}`);
     
     // Update the stack run with error
-    await updateStackRunStatus(stackRun.id, "failed", null, { message: errorMessage });
+    await updateStackRunStatus(stackRun.id, "failed", null, JSON.stringify({ message: errorMessage }));
     
     throw error;
   }

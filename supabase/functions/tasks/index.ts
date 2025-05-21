@@ -282,7 +282,7 @@ async function tasksHandler(req: Request): Promise<Response> {
         // Step 4: Immediately trigger stack processor to avoid relying on database triggers
         try {
             hostLog(logPrefix, 'info', `Directly triggering stack processor for task run ${taskRunId}`);
-            const stackProcessorUrl = `${baseUrl}/functions/v1/stack-processor/direct-process`;
+            const stackProcessorUrl = `${baseUrl}/functions/v1/stack-processor`;
             
             const processorResponse = await fetch(stackProcessorUrl, {
                 method: 'POST',
@@ -291,9 +291,7 @@ async function tasksHandler(req: Request): Promise<Response> {
                     'Authorization': `Bearer ${serviceRoleKey}`
                 },
                 body: JSON.stringify({
-                    taskName: taskFunction.name,
-                    input: input || null,
-                    taskRunId: taskRunId
+                    stackRunId: stackRunId
                 })
             });
             
@@ -594,6 +592,106 @@ async function statusHandler(req: Request): Promise<Response> {
     }
 }
 
+// Helper function to handle task logs requests
+async function logsHandler(req: Request): Promise<Response> {
+    // Extract taskRunId from query params in URL for GET requests
+    const url = new URL(req.url);
+    const taskRunId = url.searchParams.get('id');
+    
+    const logPrefix = `[tasks/logs/${taskRunId}]`;
+    
+    hostLog(logPrefix, 'info', `Received logs request for task run ID: ${taskRunId}`);
+    
+    if (!taskRunId) {
+        return new Response(
+            simpleStringify({ error: 'Missing taskRunId parameter' }),
+            { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    }
+    
+    try {
+        // Determine the correct baseUrl for database access
+        const extSupabaseUrl = Deno.env.get("EXT_SUPABASE_URL") || "";
+        const supabaseUrl = Deno.env.get("SUPABASE_URL") || "http://kong:8000";
+        
+        // Use Kong URL for local development or when EXT_SUPABASE_URL is missing
+        const useKong = extSupabaseUrl.includes('localhost') || 
+                       extSupabaseUrl.includes('127.0.0.1') || 
+                       !extSupabaseUrl;
+                       
+        const baseUrl = useKong 
+            ? 'http://kong:8000/rest/v1' 
+            : `${SUPABASE_URL}/rest/v1`;
+        
+        // Fetch task run from database
+        const dbUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}&select=*`;
+        hostLog(logPrefix, 'info', `Attempting to fetch task run from: ${dbUrl}`);
+        
+        const response = await fetch(dbUrl, {
+            headers: {
+                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                'apikey': SERVICE_ROLE_KEY
+            }
+        });
+        
+        if (!response.ok) {
+            const error = await response.text();
+            const errorMessage = `Database query failed: ${error}`;
+            hostLog(logPrefix, 'error', errorMessage);
+            return new Response(
+                simpleStringify({ error: `Failed to fetch task logs: ${errorMessage}` }),
+                { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const tasks = await response.json();
+        hostLog(logPrefix, 'info', `Database query successful. Found ${tasks.length} records.`);
+        
+        if (tasks.length === 0) {
+            return new Response(
+                simpleStringify({ error: `Task run with ID ${taskRunId} not found` }),
+                { status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const taskRun = tasks[0];
+        
+        // Check for long-running tasks or special cases
+        if (taskRun.status === 'queued' || taskRun.status === 'processing') {
+            const createdAt = new Date(taskRun.created_at);
+            const now = new Date();
+            const diffInSeconds = Math.floor((now.getTime() - createdAt.getTime()) / 1000);
+            
+            // For long-running tasks, check if waiting on something
+            if (diffInSeconds > 60 && taskRun.waiting_on_stack_run_id) {
+                hostLog(logPrefix, 'warn', `Task has been running for ${diffInSeconds}s and is waiting on stack run ${taskRun.waiting_on_stack_run_id}`);
+                // Continue processing to return available logs
+            }
+        }
+        
+        // Get logs from the task run
+        const logs = taskRun.logs || [];
+        
+        // Also check for vm_logs
+        const vmLogs = taskRun.vm_logs || [];
+        
+        return new Response(
+            simpleStringify({ 
+                logs,
+                vm_logs: vmLogs
+            }),
+            { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        hostLog(logPrefix, 'error', `Exception in logsHandler: ${errorMessage}`);
+        return new Response(
+            simpleStringify({ error: `Internal server error: ${errorMessage}` }),
+            { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
+    }
+}
+
 // Start the Deno server and pass the tasksHandler for incoming requests
 serve(async (req: Request) => {
     const url = new URL(req.url);
@@ -611,6 +709,9 @@ serve(async (req: Request) => {
             } else if (path[1] === "status") {
                 // Get task status: GET /tasks/status?id=xyz
                 return statusHandler(req);
+            } else if (path[1] === "logs") {
+                // Get task logs: GET /tasks/logs?id=xyz
+                return logsHandler(req);
             } else {
                 // Default route for backward compatibility
                 return tasksHandler(req);
@@ -624,7 +725,8 @@ serve(async (req: Request) => {
             status: "running",
             endpoints: [
                 "/tasks/execute [POST] - Execute a task",
-                "/tasks/status [GET] - Get task status"
+                "/tasks/status [GET] - Get task status",
+                "/tasks/logs [GET] - Get task logs"
             ]
         }), {
             status: 200,

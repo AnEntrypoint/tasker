@@ -5,28 +5,13 @@
   "main": "blog-generator-cli.js",
   "scripts": {
     "blog": "deno run -A test-blog-generator.js",
-    "keystore": "deno run -A test-live-keystore.ts",
+    "keystore": "deno run -A tests/live/test-live-keystore.ts",
     "pre-gapi": "supabase db reset --confirm ; supabase start",
-    "gapi": "deno run -A test-gapi-update.ts",
-    "gapi:list-domains": "concurrently --kill-others \"npm run gapi:serve\" \"npm run gapi:client\"",
+    "gapi": "deno run -A tests/gapi/test-gapi-update.ts",
     "gapi:serve": "supabase functions serve --no-verify-jwt",
-    "gapi:client": "deno run -A ./gapi-list-domains-cli.js",
-    "ephemeral": "deno run -A ephemeral-queue-process.ts",
-    "test-ephemeral": "deno run -A ./test-ephemeral-call.ts",
-    "gsuite": "deno run -A gsuite-gmail-search-cli.js",
-    "publish": "deno run -A taskcode/publish.ts",
-    "sql": "npx -y supabase-sql",
-    "tools": "npx -y supabase -y functions serve --no-verify-jwt",
-    "websearch": "deno run -A test-live-websearch.ts",
-    "openai": "deno run -A test-live-openai.ts",
-    "supabase": "deno run -A test-live-supabase.ts",
-    "gmail-search": "deno run -A gsuite-gmail-search-cli.js",
-    "task": "deno run -A run-task.ts",
-    "gapi:minimal": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-gapi-minimal.ts\"",
-    "gapi:domains": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-gapi-domains-simple.ts\"",
-    "gapi:diagnose": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-gapi-update.ts\"",
-    "gapi:ultra": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-ultra-simple-domains.ts\"",
-    "gapi:admin": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-admin-info.ts\""
+    "gapi:ultra": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A tests/gapi/test-ultra-simple-domains.ts\"",
+    "gapi:list-domains": "concurrently --kill-others \"npm run gapi:serve\" \"npm run gapi:client\"",
+    "test:suspend-resume": "deno run -A silent-check-column.ts && concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-suspend-resume-service.ts\""
   },
   "dependencies": {
     "dotenv": "^16.4.7"
