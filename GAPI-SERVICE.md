@@ -83,10 +83,9 @@ The service requires the following configuration in the keystore:
 
 Several test scripts are available to test the GAPI service:
 
-- `test-token-cache.ts` - Tests token caching functionality
-- `test-gapi-health.ts` - Tests health and status endpoints
-- `test-keystore.ts` - Tests keystore access for credentials
-- `test-gapi-domains-simple.ts` - Tests domains listing with `"my_customer"`
+- `tests/gapi/test-gapi-health.ts` - Tests health and status endpoints
+- `tests/misc/test-keystore.ts` - Tests keystore access for credentials
+- `tests/gapi/test-gapi-domains-simple.ts` - Tests domains listing with `"my_customer"`
 
 ## Implementation Details
 

@@ -56,9 +56,9 @@ class KeystoreService {
     
     // Default to Kong in local development, but we'll test connection and fallback if needed
     let baseUrl = useKong ? kongUrl : `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
-    
+
     console.log(`[KeystoreService Constructor] Initial wrappedsupabase proxy baseUrl: ${baseUrl}`);
-    
+
     // Create the test function to verify connectivity
     this.testConnectivity = async () => {
       if (!this.supabase) return false;
@@ -125,13 +125,13 @@ class KeystoreService {
     try {
       console.log(`[KeystoreService] Initializing Supabase client with baseUrl: ${baseUrl}`);
       
-      this.supabase = createServiceProxy('supabase', {
+    this.supabase = createServiceProxy('supabase', {
         baseUrl,
-        headers: {
-          'Authorization': `Bearer ${serviceRoleKey}`,
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
           'apikey': serviceRoleKey
-        }
-      });
+      }
+    });
     } catch (error: unknown) {
       console.error(`[KeystoreService] Failed to initialize Supabase client: ${error instanceof Error ? error.message : String(error)}`);
       throw error;

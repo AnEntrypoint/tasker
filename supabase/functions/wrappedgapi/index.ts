@@ -33,7 +33,7 @@ async function getCredentials(): Promise<any> {
   
   const response = await fetch(keystoreUrl, {
     method: "POST",
-    headers: {
+  headers: {
       "Content-Type": "application/json",
       'Authorization': `Bearer ${serviceRoleKey}`,
       'apikey': anonKey
@@ -172,18 +172,18 @@ serve(async (req) => {
   }
 
   // Fast health check
-  const url = new URL(req.url);
-  if (url.pathname.endsWith('/health')) {
-    return new Response(
-      JSON.stringify({ 
-        status: 'ok', 
+    const url = new URL(req.url);
+    if (url.pathname.endsWith('/health')) {
+      return new Response(
+        JSON.stringify({ 
+          status: 'ok', 
         cache_size: tokenCache.size,
-        timestamp: new Date().toISOString() 
-      }),
-      { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
-    );
-  }
-
+          timestamp: new Date().toISOString() 
+        }),
+        { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+    
   try {
     // Get request body
     const body = await req.json().catch(() => ({ method: 'unknown' }));
@@ -258,7 +258,7 @@ serve(async (req) => {
       } else {
         tokenCache.clear();
         return new Response(
-          JSON.stringify({
+          JSON.stringify({ 
             status: 'ok',
             message: 'Cleared all token caches',
             timestamp: new Date().toISOString()
@@ -326,7 +326,7 @@ serve(async (req) => {
         return new Response(
           JSON.stringify({ 
             error: `Domain list error: ${(error as Error).message}`,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString() 
           }),
           { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
         );

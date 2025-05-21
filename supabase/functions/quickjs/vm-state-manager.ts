@@ -1,8 +1,6 @@
 /**
  * VM State Manager for QuickJS
- *
- * Provides utilities for saving and restoring QuickJS VM state
- * to support ephemeral call queueing for nested module calls.
+ * Handles state capture, serialization, storage and restoration for VM suspend/resume
  */
 
 import {
@@ -38,12 +36,14 @@ export interface StackRun {
 }
 
 export interface SerializedVMState {
-  task_code: string;
-  task_name: string;
-  input: unknown;
-  parent_stack_run_id?: string;
-  global_vars: Record<string, unknown>;
-  call_context: Record<string, unknown>;
+  stackRunId: string;
+  taskRunId?: string;
+  suspended: boolean;
+  suspendedAt: string;
+  resumeFunction?: string;
+  vmSnapshot?: string;
+  parentStackRunId?: string;
+  waitingOnStackRunId?: string;
 }
 
 // ==============================
@@ -59,10 +59,30 @@ const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 // ==============================
 
 /**
- * Generate a UUID for stack runs and task runs
+ * Get configuration for Supabase
+ */
+function getSupabaseConfig(): { url: string; serviceRoleKey: string } {
+  const url = Deno.env.get("SUPABASE_URL") || 
+    Deno.env.get("EXT_SUPABASE_URL") || 
+    "http://127.0.0.1:8000";
+  
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || 
+    Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || 
+    "";
+  
+  return { url, serviceRoleKey };
+}
+
+/**
+ * Generate a UUID (v4)
  */
 export function _generateUUID(): string {
-  return crypto.randomUUID();
+  // Implementation from https://stackoverflow.com/a/2117523
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
 }
 
 /**
@@ -90,78 +110,62 @@ function getSupabaseClient() {
  * @param parentStackRunId Optional parent stack run ID
  */
 export async function saveStackRun(
-  stackRunId: string,
   serviceName: string,
   methodName: string,
-  args: unknown[],
-  parentTaskRunId?: string | null,
-  parentStackRunId?: string | null
-): Promise<void> {
-  hostLog("VM State Manager", "info", `Saving stack run: ${stackRunId} for ${serviceName}.${methodName}`);
+  args: any[],
+  vmState: SerializedVMState,
+  parentTaskRunId?: string,
+  parentStackRunId?: string
+): Promise<string> {
+  const { url, serviceRoleKey } = getSupabaseConfig();
+  
+  if (!serviceRoleKey) {
+    hostLog("VM-State-Manager", "error", "Missing service role key");
+    throw new Error("Missing service role key");
+  }
   
   try {
-    const supabase = getSupabaseClient();
+    const stackRunId = vmState.stackRunId || _generateUUID();
     
-    // Insert stack run
-    const { error } = await supabase
-      .from('stack_runs')
-      .insert({
-        id: stackRunId,
-        parent_stack_run_id: parentStackRunId || null,
-        parent_task_run_id: parentTaskRunId || null,
-        service_name: serviceName,
+    // Prepare the record
+    const record = {
+      id: stackRunId,
+      parent_task_run_id: parentTaskRunId,
+      parent_stack_run_id: parentStackRunId,
+      service_name: serviceName,
         method_name: methodName,
-        args: args,
-        status: 'pending',
+      args,
+      status: "pending",
+      vm_state: vmState,
+      waiting_on_stack_run_id: vmState.waitingOnStackRunId,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
-      });
-
-    if (error) {
-      throw new Error(`Error inserting stack run: ${error.message}`);
-    }
-
-    hostLog("VM State Manager", "info", `Stack run saved: ${stackRunId}`);
-
-    // If this stack run has a parent stack run, mark it as suspended
-    if (parentStackRunId) {
-      await updateParentStackRunStatus(parentStackRunId, stackRunId);
-    }
-
-    // Trigger stack processor to handle the new stack run
-    await triggerStackProcessor();
+    };
     
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error saving stack run: ${errorMessage}`);
-    throw new Error(`Failed to save stack run: ${errorMessage}`);
-  }
-}
-
-/**
- * Updates the parent stack run's status to suspended_waiting_child
- */
-async function updateParentStackRunStatus(parentStackRunId: string, childStackRunId: string): Promise<void> {
-  hostLog("VM State Manager", "info", `Marking parent stack run ${parentStackRunId} as suspended_waiting_child`);
-  
-  try {
-    const { error: updateError } = await getSupabaseClient()
-      .from('stack_runs')
-      .update({
-        status: 'suspended_waiting_child',
-        waiting_on_stack_run_id: childStackRunId,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', parentStackRunId);
-      
-    if (updateError) {
-      hostLog("VM State Manager", "error", `Error updating parent stack run: ${updateError.message}`);
-    } else {
-      hostLog("VM State Manager", "info", `Parent stack run ${parentStackRunId} marked as suspended_waiting_child`);
+    // Insert the record
+    const response = await fetch(`${url}/rest/v1/stack_runs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceRoleKey}`,
+        "apikey": serviceRoleKey,
+        "Prefer": "return=minimal"
+      },
+      body: JSON.stringify(record)
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      hostLog("VM-State-Manager", "error", `Error saving stack run: ${response.status} ${response.statusText} - ${errorText}`);
+      throw new Error(`Error saving stack run: ${response.status} ${response.statusText}`);
     }
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error updating parent stack run: ${errorMessage}`);
+    
+    hostLog("VM-State-Manager", "info", `Saved stack run: ${stackRunId}`);
+    
+    return stackRunId;
+  } catch (error) {
+    hostLog("VM-State-Manager", "error", `Error saving stack run: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   }
 }
 
@@ -169,34 +173,31 @@ async function updateParentStackRunStatus(parentStackRunId: string, childStackRu
  * Triggers the stack processor to process the next stack run
  */
 export async function triggerStackProcessor(): Promise<void> {
-  if (!SUPABASE_URL) {
-    hostLog("VM State Manager", "error", "Cannot trigger stack processor: SUPABASE_URL not set");
+  const { url, serviceRoleKey } = getSupabaseConfig();
+  
+  if (!serviceRoleKey) {
+    hostLog("VM-State-Manager", "error", "Missing service role key");
     return;
   }
   
-  hostLog("VM State Manager", "info", `Triggering stack processor`);
-  
   try {
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/stack-processor`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`
-      },
+    const response = await fetch(`${url}/functions/v1/stack-processor`, {
+      method: "POST",
+          headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceRoleKey}`
+          },
       body: JSON.stringify({
-        trigger: 'vm-state-manager'
+        trigger: "quickjs"
       })
-    });
+        });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Error triggering stack processor: ${response.status} - ${text}`);
+        if (!response.ok) {
+      const errorText = await response.text();
+      hostLog("VM-State-Manager", "error", `Error triggering stack processor: ${response.status} ${response.statusText} - ${errorText}`);
     }
-    
-    hostLog("VM State Manager", "info", `Stack processor triggered successfully`);
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error triggering stack processor: ${errorMessage}`);
+  } catch (error) {
+    hostLog("VM-State-Manager", "error", `Error triggering stack processor: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -247,24 +248,24 @@ export async function updateStackRun(
       status,
       updated_at: new Date().toISOString()
     };
-
+    
     if (result !== undefined) {
       updateData.result = result;
     }
-
+    
     if (error !== undefined) {
       updateData.error = error;
     }
-
+    
     const { error: updateError } = await getSupabaseClient()
       .from('stack_runs')
       .update(updateData)
       .eq('id', stackRunId);
-
+      
     if (updateError) {
       hostLog("VM State Manager", "error", `Error updating stack run: ${updateError.message}`);
       throw updateError;
-    }
+      }
 
     hostLog("VM State Manager", "info", `Stack run ${stackRunId} updated to status: ${status}`);
   } catch (error: unknown) {
@@ -354,15 +355,15 @@ export async function updateTaskRun(
       status,
       updated_at: new Date().toISOString()
     };
-    
+
     if (result !== undefined) {
       updateData.result = result;
     }
-    
+
     if (error !== undefined) {
       updateData.error = error;
     }
-    
+
     // End timestamp for terminal states
     if (status === 'completed' || status === 'failed') {
       updateData.ended_at = new Date().toISOString();
@@ -373,7 +374,7 @@ export async function updateTaskRun(
       .from('task_runs')
       .update(updateData)
       .eq('id', taskRunId);
-      
+
     if (updateError) {
       throw new Error(`Error updating task run: ${updateError.message}`);
     }
@@ -393,156 +394,86 @@ export async function updateTaskRun(
  * Captures VM state information to be serialized and stored
  */
 export function captureVMState(
-  context: QuickJSAsyncContext, 
-  taskCode: string,
-  taskName: string,
-  taskInput: unknown,
-  parentRunId?: string
+  ctx: any, 
+  taskRunId: string | undefined, 
+  waitingOnStackRunId: string | undefined
 ): SerializedVMState {
-  hostLog("VM State Manager", "info", `Capturing VM state for task: ${taskName}`);
+  const stackRunId = _generateUUID();
   
-  // Extract global variables from the context
-  const globalVars = extractGlobalVars(context);
-  
-  // Extract call context information
-  const callContext = extractCallContext(context);
-
-  // Create a state object with all information
-  const vmState: SerializedVMState = {
-    task_code: taskCode,
-    task_name: taskName,
-    input: taskInput,
-    parent_stack_run_id: parentRunId,
-    global_vars: globalVars,
-    call_context: callContext
+  return {
+    stackRunId,
+    taskRunId,
+    suspended: true,
+    suspendedAt: new Date().toISOString(),
+    waitingOnStackRunId
   };
-  
-  hostLog("VM State Manager", "info", `VM state captured for task: ${taskName}`);
-  return vmState;
-}
-
-/**
- * Extract global variables from VM context
- */
-function extractGlobalVars(context: QuickJSAsyncContext): Record<string, unknown> {
-  let globalVars: Record<string, unknown> = {};
-  try {
-    // Get global state from the VM context by evaluating a serialization function
-    const evalResult = context.evalCode(`
-      (() => {
-        const globals = {};
-        // List of important global variables to capture
-        const globalVarNames = [
-          // Task-specific globals
-          'taskRunId', 'taskName', 'taskInput', 'taskResult',
-          // State tracking variables
-          'callSiteId', 'resumePayload', 'suspendedCallData',
-          // Other important globals
-          'serviceProxies', 'moduleCache'
-        ];
-
-        // Capture each global variable if it exists
-        for (const varName of globalVarNames) {
-          if (typeof globalThis[varName] !== 'undefined') {
-            try {
-              // Only capture serializable values
-              globals[varName] = JSON.parse(JSON.stringify(globalThis[varName]));
-            } catch (e) {
-              console.log('Failed to serialize global var:', varName);
-            }
-          }
-        }
-        return globals;
-      })()
-    `);
-    
-    if (!evalResult.error && evalResult.value) {
-      // Extract the globals object from the VM
-      globalVars = context.dump(evalResult.value) as Record<string, unknown>;
-      evalResult.value.dispose();
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error extracting global variables: ${errorMessage}`);
-    // Continue with empty globals if extraction fails
-  }
-  
-  return globalVars;
-}
-
-/**
- * Extract call context information from VM
- */
-function extractCallContext(context: QuickJSAsyncContext): Record<string, unknown> {
-  let callContext: Record<string, unknown> = {};
-  try {
-    // Get call context from the VM by evaluating a function that captures call site info
-    const evalResult = context.evalCode(`
-      (() => {
-        const callSiteInfo = {
-          // The current position in the code where execution is suspended
-          callSiteId: typeof callSiteId !== 'undefined' ? callSiteId : null,
-          // Metadata about child function being called
-          suspendedCallData: typeof suspendedCallData !== 'undefined' ? suspendedCallData : null,
-          // Call stack information if available
-          stackTrace: new Error().stack,
-          // Current time for debugging
-          suspendedAt: new Date().toISOString()
-        };
-        return callSiteInfo;
-      })()
-    `);
-    
-    if (!evalResult.error && evalResult.value) {
-      // Extract the call context from the VM
-      callContext = context.dump(evalResult.value) as Record<string, unknown>;
-      evalResult.value.dispose();
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error extracting call context: ${errorMessage}`);
-    // Continue with empty call context if extraction fails
-  }
-  
-  return callContext;
 }
 
 /**
  * Restores the VM state from the database
  */
-export async function restoreVMState(
-  stackRunId: string
-): Promise<{ context: QuickJSAsyncContext, stackRun: StackRun }> {
-  hostLog("VM State Manager", "info", `Restoring VM state for stack run ID: ${stackRunId}`);
-
+export async function restoreVMState(stackRunId: string): Promise<{ context: any; stackRun: any }> {
+  const { url, serviceRoleKey } = getSupabaseConfig();
+  
+  if (!serviceRoleKey) {
+    hostLog("VM-State-Manager", "error", "Missing service role key");
+    throw new Error("Missing service role key");
+  }
+  
   try {
-    // Fetch the stack run record
-    const stackRun = await getStackRun(stackRunId);
+    // Fetch the stack run
+    const response = await fetch(`${url}/rest/v1/stack_runs?id=eq.${stackRunId}&select=*`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceRoleKey}`,
+        "apikey": serviceRoleKey
+      }
+    });
     
-    // Create a new QuickJS async context for the restored VM
-    const quickjs = await getQuickJS();
-    const rt = quickjs.newRuntime();
-    const asyncContext = await newAsyncContext(rt as any);
-    
-    hostLog("VM State Manager", "info", `Created new VM context for stack run: ${stackRunId}`);
-    
-    // If we don't have saved VM state, just return the fresh context
-    if (!stackRun.vm_state) {
-      hostLog("VM State Manager", "info", `No VM state found for stack run: ${stackRunId}`);
-      return { context: asyncContext, stackRun };
+    if (!response.ok) {
+      const errorText = await response.text();
+      hostLog("VM-State-Manager", "error", `Error fetching stack run: ${response.status} ${response.statusText} - ${errorText}`);
+      throw new Error(`Error fetching stack run: ${response.status} ${response.statusText}`);
     }
     
-    // Strongly type the VM state for safer access
-    const vmState = stackRun.vm_state as SerializedVMState;
+    const stackRuns = await response.json();
     
-    // Restore the VM state (this is a simplified version)
-    hostLog("VM State Manager", "info", `Restoring VM state for stack run: ${stackRunId}`);
+    if (!stackRuns || !Array.isArray(stackRuns) || stackRuns.length === 0) {
+      throw new Error(`Stack run not found: ${stackRunId}`);
+    }
     
-    return { context: asyncContext, stackRun };
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    hostLog("VM State Manager", "error", `Error restoring VM state: ${errorMessage}`);
-    throw new Error(`Failed to restore VM state: ${errorMessage}`);
+    const stackRun = stackRuns[0];
+    
+    // Update status to processing
+    const updateResponse = await fetch(`${url}/rest/v1/stack_runs?id=eq.${stackRunId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${serviceRoleKey}`,
+        "apikey": serviceRoleKey,
+        "Prefer": "return=minimal"
+      },
+      body: JSON.stringify({
+        status: "processing",
+        updated_at: new Date().toISOString()
+      })
+    });
+    
+    if (!updateResponse.ok) {
+      const errorText = await updateResponse.text();
+      hostLog("VM-State-Manager", "error", `Error updating stack run status: ${updateResponse.status} ${updateResponse.statusText} - ${errorText}`);
+      throw new Error(`Error updating stack run status: ${updateResponse.status} ${updateResponse.statusText}`);
+    }
+    
+    // Create a new QuickJS context
+    // Using dynamic import to avoid hard dependencies
+    const context = await createQuickJSContext();
+    
+    return { context, stackRun };
+  } catch (error) {
+    hostLog("VM-State-Manager", "error", `Error restoring VM state: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
   }
 }
 
