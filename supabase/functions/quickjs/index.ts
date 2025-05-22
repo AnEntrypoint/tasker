@@ -281,6 +281,9 @@ function setupHostToolCaller(ctx: QuickJSAsyncContext, taskRunId: string): void 
 			ctx.setProp(suspendInfoObj, "serviceName", ctx.newString(serviceName));
 			ctx.setProp(suspendInfoObj, "methodName", ctx.newString(methodName));
 			ctx.setProp(suspendInfoObj, "args", createHandleFromJson(ctx, args, []));
+			
+			// Use the task run ID that was set in setupTaskEnvironment, which should be the real DB taskRunId
+			// Not storing a new random ID for parentTaskRunId as was done previously
 			ctx.setProp(suspendInfoObj, "parentTaskRunId", ctx.newString(taskRunId));
 			
 			// Set the suspend info in the global context
@@ -289,6 +292,7 @@ function setupHostToolCaller(ctx: QuickJSAsyncContext, taskRunId: string): void 
 			// Log the suspension
 			hostLog("HostTool", "info", `Will suspend VM for call to ${serviceName}.${methodName}`);
 			hostLog("HostTool", "info", `With stack run ID: ${stackRunId}`);
+			hostLog("HostTool", "info", `Parent task run ID: ${taskRunId}`);
 			
 			// Return the promise to be awaited in the VM
 			return deferred.promise;
@@ -343,30 +347,48 @@ function setupToolsObject(ctx: QuickJSAsyncContext, taskRunId: string): void {
 	ctx.setProp(
 		tasksObj,
 		"execute", 
-		ctx.newFunction("execute", (taskName: string, input: unknown) => {
-			hostLog(logPrefix, "info", `Intercepting tasks.execute call: ${taskName}`);
-			
-			// Generate a unique ID for this stack run
-			const stackRunId = _generateUUID();
-			
-			// Capture the VM state
-			const vmState = captureVMState(ctx, taskRunId, stackRunId);
-			
-			// Save this stack run
-			saveStackRun("tasks", "execute", [taskName, input], vmState, taskRunId)
-				.then(() => {
-					hostLog(logPrefix, "info", `Stack run created: ${stackRunId}`);
-					
-					// Trigger the stack processor
-					return triggerStackProcessor();
-				})
-				.catch(error => {
-					hostLog(logPrefix, "error", `Error creating stack run: ${error.message}`);
-				});
-			
-			// Return a promise that will be resolved by the VM state manager
-			// This will cause the VM to suspend execution
-			return ctx.newPromise();
+		ctx.newFunction("execute", (taskNameHandle: QuickJSHandle, inputHandle: QuickJSHandle) => {
+			try {
+				// Extract task name and input
+				const taskName = ctx.typeof(taskNameHandle) === 'string' ? ctx.getString(taskNameHandle) : "[Invalid Task Name]";
+				const input = ctx.dump(inputHandle);
+				
+				hostLog(logPrefix, "info", `Intercepting tasks.execute call: ${taskName}`);
+				
+				// Generate a unique ID for this stack run
+				const stackRunId = _generateUUID();
+				
+				// Get the parent task run ID from the global context to ensure consistency
+				const currentTaskRunId = taskRunId;
+				
+				// Capture the VM state
+				const vmState = captureVMState(ctx, currentTaskRunId, stackRunId);
+				
+				// Save this stack run
+				saveStackRun("tasks", "execute", [taskName, input], vmState, currentTaskRunId)
+					.then(() => {
+						hostLog(logPrefix, "info", `Stack run created: ${stackRunId}`);
+						
+						// Trigger the stack processor
+						return triggerStackProcessor();
+					})
+					.catch(error => {
+						hostLog(logPrefix, "error", `Error creating stack run: ${error.message}`);
+					});
+				
+				// Return a promise that will be resolved by the VM state manager
+				// This will cause the VM to suspend execution
+				return ctx.newPromise();
+			} catch (error) {
+				// Log the error
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				hostLog(logPrefix, "error", `Error in tasks.execute: ${errorMsg}`);
+				
+				// Return an error object
+				const errorObj = ctx.newObject();
+				ctx.setProp(errorObj, "error", ctx.newString(errorMsg));
+				return errorObj;
+			}
 		})
 	);
 	
@@ -597,7 +619,7 @@ function createServiceProxyObject(ctx: QuickJSAsyncContext, serviceName: string,
 /**
  * Main function to execute a task in QuickJS
  */
-async function executeQuickJS(taskCode: string, taskName: string, taskInput: any): Promise<any> {
+async function executeQuickJS(taskCode: string, taskName: string, taskInput: any, providedTaskRunId?: string): Promise<any> {
 	const logPrefix = `QuickJS-${taskName}`;
 	let quickJSInstance: QuickJSAsyncWASMModule | null = null;
 	let rt: QuickJSRuntime | null = null;
@@ -613,7 +635,8 @@ async function executeQuickJS(taskCode: string, taskName: string, taskInput: any
 		ctx = await newAsyncContext(rt as any);
 		
 		// Set up the environment
-		const taskRunId = crypto.randomUUID();
+		// Use the provided taskRunId if available, otherwise generate a new one
+		const taskRunId = providedTaskRunId || crypto.randomUUID();
 		await setupTaskEnvironment(ctx, taskRunId);
 		
 		// Evaluate the task code and get handler function
@@ -1073,8 +1096,8 @@ async function handleDirectExecution(
 	hostLog(logPrefix, "info", `Starting direct execution of ${taskName} with run ID ${taskRunId}`);
 	
 	try {
-		// Execute the task in QuickJS with a timeout
-		const result = await executeQuickJS(taskCode, taskName, taskInput);
+		// Execute the task in QuickJS with a timeout, passing the taskRunId
+		const result = await executeQuickJS(taskCode, taskName, taskInput, taskRunId);
 		
 		// Check if the task execution was suspended for a host call
 		if (result && typeof result === 'object' && result.__hostCallSuspended) {
@@ -1134,29 +1157,70 @@ async function handleAsyncExecution(
 	hostLog(logPrefix, "info", `Starting async execution of ${taskName} with run ID ${taskRunId}`);
 	
 	try {
-		// Create a task run record
-		const { data: taskRunData, error: taskRunInsertError } = await supabaseClient
+		// Check if this taskRunId already exists in the database
+		// If the stack-processor is calling us with an existing taskRunId, we should use it
+		// rather than creating a new one
+		const { data: existingTaskRun, error: checkError } = await supabaseClient
 			.from('task_runs')
-			.insert({
-				id: taskRunId,
-				task_name: taskName,
-				status: 'processing',
-				input: taskInput,
-				started_at: new Date().toISOString()
-			})
-			.select('id')
-			.single();
+			.select('id, status')
+			.eq('id', taskRunId)
+			.maybeSingle();
+			
+		if (checkError) {
+			hostLog(logPrefix, "error", `Error checking for existing task run: ${checkError.message}`);
+			// Continue with normal flow - we'll try to create a new record
+		}
 		
-		if (taskRunInsertError) {
-			hostLog(logPrefix, "error", `Failed to insert task run: ${taskRunInsertError.message}`);
-			throw new Error(`Failed to create task run: ${taskRunInsertError.message}`);
+		// If task run already exists, use it instead of creating a new one
+		const taskRunExists = existingTaskRun !== null;
+		
+		if (taskRunExists) {
+			hostLog(logPrefix, "info", `Using existing task run with ID ${taskRunId} and status ${existingTaskRun.status}`);
+			
+			// Only update status to processing if it's not already in a terminal state
+			if (existingTaskRun.status !== 'completed' && existingTaskRun.status !== 'failed') {
+				// Update the status to processing if needed
+				const { error: updateError } = await supabaseClient
+					.from('task_runs')
+					.update({
+						status: 'processing',
+						updated_at: new Date().toISOString()
+					})
+					.eq('id', taskRunId);
+					
+				if (updateError) {
+					hostLog(logPrefix, "warn", `Failed to update existing task run status: ${updateError.message}`);
+					// Continue execution anyway
+				}
+			} else {
+				hostLog(logPrefix, "warn", `Task run ${taskRunId} is already in terminal state: ${existingTaskRun.status}. Continuing execution anyway.`);
+			}
+		} else {
+			// Create a new task run record only if it doesn't already exist
+			hostLog(logPrefix, "info", `Creating new task run record with ID ${taskRunId}`);
+			const { data: taskRunData, error: taskRunInsertError } = await supabaseClient
+				.from('task_runs')
+				.insert({
+					id: taskRunId,
+					task_name: taskName,
+					status: 'processing',
+					input: taskInput,
+					started_at: new Date().toISOString()
+				})
+				.select('id')
+				.single();
+			
+			if (taskRunInsertError) {
+				hostLog(logPrefix, "error", `Failed to insert task run: ${taskRunInsertError.message}`);
+				throw new Error(`Failed to create task run: ${taskRunInsertError.message}`);
+			}
 		}
 		
 		// Start execution in the background
 		(async () => {
 			try {
-				// Execute the task in QuickJS
-				const result = await executeQuickJS(taskCode, taskName, taskInput);
+				// Execute the task in QuickJS, passing the taskRunId
+				const result = await executeQuickJS(taskCode, taskName, taskInput, taskRunId);
 				
 				// Check if the task execution was suspended for a host call
 				if (result && typeof result === 'object' && result.__hostCallSuspended) {
@@ -1180,7 +1244,7 @@ async function handleAsyncExecution(
 						null,
 						null
 					);
-    } else {
+				} else {
 					// Normal completion - update task run with result
 					await updateTaskRunStatus(
 						supabaseClient, 

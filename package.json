@@ -8,10 +8,11 @@
     "keystore": "deno run -A tests/live/test-live-keystore.ts",
     "pre-gapi": "supabase db reset --confirm ; supabase start",
     "gapi": "deno run -A tests/gapi/test-gapi-update.ts",
-    "gapi:serve": "supabase functions serve --no-verify-jwt",
-    "gapi:ultra": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A tests/gapi/test-ultra-simple-domains.ts\"",
+    "gapi:serve": "supabase functions serve --no-verify-jwt tasks stack-processor quickjs wrappedgapi wrappedkeystore",
+    "gapi:ultra": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-ultra-simple-domains.ts\"",
     "gapi:list-domains": "concurrently --kill-others \"npm run gapi:serve\" \"npm run gapi:client\"",
-    "test:suspend-resume": "deno run -A silent-check-column.ts && concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-suspend-resume-service.ts\""
+    "test:suspend-resume": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-suspend-resume-service.ts\"",
+    "publish:task": "deno run -A taskcode/publish.ts --specific test-gapi-domains-service"
   },
   "dependencies": {
     "dotenv": "^16.4.7"

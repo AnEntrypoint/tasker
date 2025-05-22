@@ -4,7 +4,7 @@ const env = config();
 
 async function testGapiDomainsSuspendResume() {
   // Add delay to let the server start
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 10000));
   console.log('Testing GAPI domains list via suspend-resume mechanism');
   
   try {
