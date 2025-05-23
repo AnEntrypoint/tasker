@@ -8,7 +8,7 @@ const env = config();
  */
 async function testUltraSimpleDomains() {
   console.log('Starting ultra-simple domains test...');
-  
+  await new Promise(resolve => setTimeout(resolve, 10000));
   try {
     // Make the call with minimal options and the shortest path
     const response = await fetch("http://127.0.0.1:8000/functions/v1/wrappedgapi", {

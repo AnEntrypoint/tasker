@@ -12,6 +12,7 @@
     "gapi:ultra": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-ultra-simple-domains.ts\"",
     "gapi:list-domains": "concurrently --kill-others \"npm run gapi:serve\" \"npm run gapi:client\"",
     "test:suspend-resume": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-suspend-resume-service.ts\"",
+    "test:suspend-resume-minimal": "concurrently --kill-others \"supabase functions serve --no-verify-jwt quickjs wrappedwebsearch stack-processor\" \"deno run --allow-net --allow-env --allow-read test-suspend-resume-minimal.ts\"",
     "publish:task": "deno run -A taskcode/publish.ts --specific test-gapi-domains-service"
   },
   "dependencies": {

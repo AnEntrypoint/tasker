@@ -220,9 +220,9 @@ async function tasksHandler(req: Request): Promise<Response> {
             args: [taskFunction.name, input || null],
             status: 'pending',
             vm_state: {
-                task_code: taskFunction.code,
-                task_name: taskFunction.name,
-                input: input || null
+                taskCode: taskFunction.code,
+                taskName: taskFunction.name,
+                taskInput: input || null
             }
         };
         
@@ -503,14 +503,15 @@ async function statusHandler(req: Request): Promise<Response> {
                                         
                                         // Fallback: Try to find any stack run related to this task
                                         try {
-                                            if (taskRunData.waiting_on_stack_run_id) {
-                                                // If we have a waiting_on_stack_run_id, just look at that
-                                                return null; // We'll check again later
+                                            if (taskRun.waiting_on_stack_run_id) {
+                                                // If we have a waiting_on_stack_run_id, just wait for that to complete
+                                                hostLog(logPrefix, 'info', `Task is waiting on stack run ${taskRun.waiting_on_stack_run_id}, no manual intervention needed`);
+                                                // Continue with normal status return
                                             }
                                             
                                             const allStackRunsUrl = `${baseUrl}/stack_runs?select=*&or=(parent_task_run_id.eq.${taskRunId})&order=created_at.desc&limit=1`;
                                             
-                                            hostLog('info', logPrefix, `Checking for any stack runs: ${allStackRunsUrl}`);
+                                            hostLog(logPrefix, 'info', `Checking for any stack runs: ${allStackRunsUrl}`);
                                             
                                             const allStackRunsResponse = await fetch(allStackRunsUrl, {
                                                 headers: {
