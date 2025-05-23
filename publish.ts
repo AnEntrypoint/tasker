@@ -38,9 +38,7 @@ const logger = {
 const CONFIG = {
   SUPABASE_URL: "http://127.0.0.1:8000", // Always use local URL for development
   SUPABASE_SERVICE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
-  TASK_DIRS: [
-    Deno.env.get("TASKS_DIRECTORY") ? `${Deno.env.get("TASKS_DIRECTORY")}/endpoints/` : "./endpoints/"
-  ]
+  TASK_DIRS: ["./endpoints/"] // Use direct path to endpoints directory
 };
 
 function createSupabaseClient() {
@@ -83,23 +81,33 @@ async function discoverTasks(): Promise<string[]> {
   if (args.specific && specificTasks.length > 0) {
     logger.info(`Looking for specific tasks: ${specificTasks.join(", ")}`);
     for (const dir of CONFIG.TASK_DIRS) {
+      logger.info(`Checking directory: ${dir}`);
       if (await fs.exists(dir)) {
         for (const taskName of specificTasks) {
           const jsFilePath = path.join(dir, `${taskName}.js`);
+          logger.info(`Checking if file exists: ${jsFilePath}`);
           if (await fs.exists(jsFilePath)) {
+            logger.info(`File found: ${jsFilePath}`);
             taskFiles.push(jsFilePath);
+          } else {
+            logger.info(`File not found: ${jsFilePath}`);
           }
         }
+      } else {
+        logger.info(`Directory does not exist: ${dir}`);
       }
     }
   } else {
     for (const dir of CONFIG.TASK_DIRS) {
+      logger.info(`Checking directory: ${dir}`);
       if (await fs.exists(dir)) {
         for await (const entry of Deno.readDir(dir)) {
           if (entry.isFile && entry.name.endsWith(".js")) {
             taskFiles.push(path.join(dir, entry.name));
           }
         }
+      } else {
+        logger.info(`Directory does not exist: ${dir}`);
       }
     }
   }
@@ -165,12 +173,18 @@ async function main() {
     logger.info("Waiting for 3 seconds before starting...");
     await new Promise(resolve => setTimeout(resolve, 3000)); // Add 3-second delay
 
+    // Log all arguments for debugging
+    logger.info(`All arguments: ${Deno.args.join(', ')}`);
+    logger.info(`args.specific: ${args.specific}`);
+    logger.info(`specificTasks: ${args.getSpecificTasks().join(', ')}`);
+    
     if (args.list) {
       await listTasks();
       return;
     }
 
     const client = createSupabaseClient();
+    logger.info("Created Supabase client, discovering tasks...");
     const taskFiles = await discoverTasks();
 
     if (taskFiles.length === 0) {
@@ -199,4 +213,4 @@ async function main() {
   }
 }
 
-main();
+main(); 

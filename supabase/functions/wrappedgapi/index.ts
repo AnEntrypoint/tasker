@@ -333,6 +333,95 @@ serve(async (req) => {
       }
     }
     
+    // Admin users direct implementation with token caching
+    if (body?.chain?.[0]?.property === 'admin' && 
+        body.chain[1]?.property === 'users' && 
+        body.chain[2]?.property === 'list') {
+      
+      try {
+        // Get admin email - cached after first call
+        const adminEmail = await getAdminEmail();
+        
+        // Get token with appropriate scopes for user management
+        const token = await getAccessToken([
+          'https://www.googleapis.com/auth/admin.directory.user.readonly'
+        ]);
+        
+        // Get parameters from the request
+        const usersArgs = body.chain[2]?.args?.[0] || {};
+        
+        // Build query parameters
+        const queryParams = new URLSearchParams();
+        
+        // Add domain parameter if specified
+        if (usersArgs.domain) {
+          queryParams.set('domain', usersArgs.domain);
+          console.log(`Filtering users by domain: ${usersArgs.domain}`);
+        }
+        
+        // Add maxResults parameter if specified (default to 100 if not specified)
+        const maxResults = usersArgs.maxResults || 100;
+        queryParams.set('maxResults', maxResults.toString());
+        
+        // Add customer parameter - use my_customer if not specified
+        if (usersArgs.customer) {
+          queryParams.set('customer', usersArgs.customer);
+        } else {
+          queryParams.set('customer', 'my_customer');
+        }
+        
+        // Add orderBy parameter if specified
+        if (usersArgs.orderBy) {
+          queryParams.set('orderBy', usersArgs.orderBy);
+        }
+        
+        // Add query parameter if specified
+        if (usersArgs.query) {
+          queryParams.set('query', usersArgs.query);
+        }
+        
+        // Add showDeleted parameter if specified
+        if (usersArgs.showDeleted) {
+          queryParams.set('showDeleted', usersArgs.showDeleted.toString());
+        }
+        
+        // Add viewType parameter if specified
+        if (usersArgs.viewType) {
+          queryParams.set('viewType', usersArgs.viewType);
+        }
+        
+        console.log(`Listing users with params: ${queryParams.toString()}`);
+        
+        // Make direct API call using cached token
+        const usersUrl = `https://admin.googleapis.com/admin/directory/v1/users?${queryParams.toString()}`;
+        const response = await fetch(usersUrl, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json'
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          return new Response(
+            JSON.stringify(data),
+            { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
+          );
+        } else {
+          const errorBody = await response.text();
+          throw new Error(`Google API returned ${response.status}: ${errorBody}`);
+        }
+      } catch (error) {
+        return new Response(
+          JSON.stringify({ 
+            error: `User list error: ${(error as Error).message}`,
+            timestamp: new Date().toISOString() 
+          }),
+          { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+    }
+    
     // For all other Google API requests, use the SDK processor
     return await processSdkRequest(req, {
       sdkConfig: {

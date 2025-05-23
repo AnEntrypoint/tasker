@@ -42,38 +42,8 @@ module.exports = async function execute(input, context) {
     
     console.log(`Got domains result: ${JSON.stringify(domainsResult)}`);
     
-    // If no domains were returned, use mock data for testing
-    let domains = domainsResult.domains;
-    if (!domains || !Array.isArray(domains) || domains.length === 0) {
-      console.warn("No domains returned from API, using mock data for testing");
-      domains = [
-      { 
-        domainName: "example1.com", 
-        verified: true, 
-        isPrimary: true, 
-        creationTime: new Date(Date.now() - 10000000000).toISOString() 
-      },
-      { 
-        domainName: "example2.org", 
-        verified: true, 
-        isPrimary: false, 
-        creationTime: new Date(Date.now() - 5000000000).toISOString() 
-      },
-      { 
-        domainName: "test-example3.com", 
-        verified: false, 
-        isPrimary: false, 
-        creationTime: new Date(Date.now() - 2000000000).toISOString() 
-      },
-      { 
-        domainName: "dev-example4.net", 
-        verified: false, 
-        isPrimary: false, 
-        creationTime: new Date(Date.now() - 1000000000).toISOString() 
-      }
-    ];
-    }
-    
+    // Extract domains from the result
+    let domains = domainsResult.domains || [];
     console.log(`Found ${domains.length} domains`);
     
     // Gather additional stats if requested through a nested task call

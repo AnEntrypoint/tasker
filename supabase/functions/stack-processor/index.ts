@@ -3,8 +3,8 @@
 // This edge function is triggered when a new pending stack run is created
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.1";
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
 import { corsHeaders } from "../_shared/cors.ts";
 import { 
   prepareStackRunResumption, 
@@ -30,7 +30,10 @@ function getSupabaseConfig() {
 // Log function with timestamp and prefix
 function log(level: string, message: string, data?: any) {
   const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}${data !== undefined ? ' ' + JSON.stringify(data) : ''}`);
+  console.log(`[${timestamp}] [${level.toUpperCase()}] [stack-processor] ${message}`);
+  if (data) {
+    console.log(JSON.stringify(data, null, 2));
+  }
 }
 
 // Define a type for method chain items
@@ -108,7 +111,7 @@ async function updateStackRunStatus(stackRunId: string, status: string, result: 
     
     if (updateError) {
       log("error", `Error updating stack run ${stackRunId} status: ${updateError.message}`);
-      } else {
+    } else {
       log("info", `Stack run ${stackRunId} status updated to ${status}`);
     }
   } catch (error) {
@@ -166,112 +169,100 @@ async function processStackRun(stackRunId: string): Promise<any> {
 
   if (!stackRun) {
     log("error", `Stack run ${stackRunId} not found`);
-    // Call processPendingStackRuns even if this specific one fails to load
     await processPendingStackRuns();
     return { status: "error", error: "Stack run not found" };
   }
 
   if (stackRun.status === "completed" || stackRun.status === "failed") {
     log("info", `Stack run ${stackRunId} already has status: ${stackRun.status}`);
-    // Call processPendingStackRuns as this run is already terminal
     await processPendingStackRuns();
     return { status: stackRun.status, result: stackRun.result, error: stackRun.error };
   }
 
-  // If a run is 'waiting_on_stack_run_id' or 'ready_to_resume', it's not processed by the 'pending' queue directly.
-  // 'ready_to_resume' should be picked up by resumeTaskFromVM.
-  // 'waiting_on_stack_run_id' means it's legitimately paused.
   if (stackRun.status === "waiting_on_stack_run_id") {
       log("info", `Stack run ${stackRunId} is waiting on another run, skipping processing via pending queue.`);
       await processPendingStackRuns();
       return { status: "waiting" };
   }
-   if (stackRun.status === "ready_to_resume") {
-      log("info", `Stack run ${stackRunId} is ready_to_resume. Attempting to resume.`);
-      // childResult for resumeTaskFromVM would have been stored in vm_state or passed if available
-      // For now, assume vm_state has what it needs via prepareStackRunResumption
-      // The 'result' field of a 'ready_to_resume' run often stores the child_result.
+   
+  if (stackRun.status === "pending_resume") {
+      log("info", `Stack run ${stackRunId} is ready to resume. Attempting to resume.`);
       const childResult = stackRun.result && stackRun.result.child_result ? stackRun.result.child_result : null;
       try {
-        await resumeTaskFromVM(stackRunId, childResult); // This will handle its own completion/failure/pause
+        await resumeTaskFromVM(stackRunId, childResult);
       } catch(e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
         log("error", `Error during explicit resume of ${stackRunId}: ${errorMsg}`);
-        // Fetch fresh state before failing
         const currentRunState = await getStackRun(stackRunId);
         if (currentRunState) await failStackRun(currentRunState, `Resumption error: ${errorMsg}`);
         else await updateStackRunStatus(stackRunId, "failed", null, `Resumption error: ${errorMsg}`);
       } finally {
         await processPendingStackRuns();
       }
-      return { status: "resuming" }; // Indicate resumption was attempted
+      return { status: "resuming" };
   }
 
-  await updateStackRunStatus(stackRunId, "in_progress");
+  await updateStackRunStatus(stackRunId, "processing");
 
   try {
-    let resultPayload;
-    let outcomeStatus: 'completed' | 'paused' | 'error' | 'unknown' = 'unknown';
-    let outcomeErrorMessage: string | undefined;
-    let outcomeWaitingOn: string | undefined;
-
     if (stackRun.service_name === "gapi") {
       log("info", `Identified GAPI service call: ${stackRun.method_name}`);
-      resultPayload = await processGapiCall(stackRun);
-      outcomeStatus = 'completed';
-    } else if (stackRun.vm_state && stackRun.vm_state.task_code) {
-      log("info", `Identified task VM execution for: ${stackRun.vm_state.task_name || 'unknown task'} (ID: ${stackRun.id})`);
-      const quickJsOutcome = await processTaskExecution(stackRun);
-      outcomeStatus = quickJsOutcome.status;
-      resultPayload = quickJsOutcome.result;
-      outcomeErrorMessage = quickJsOutcome.error;
-      outcomeWaitingOn = quickJsOutcome.waiting_on_stack_run_id;
-    } else if (stackRun.method_name === 'tasks.execute') { // Special handling for tasks.execute if not caught by vm_state
-      log("info", `Identified tasks.execute call for: ${stackRun.args ? stackRun.args[0] : 'unknown task'} (ID: ${stackRun.id})`);
-      const quickJsOutcome = await processTaskExecution(stackRun); // Re-route to use the same logic
-      outcomeStatus = quickJsOutcome.status;
-      resultPayload = quickJsOutcome.result;
-      outcomeErrorMessage = quickJsOutcome.error;
-      outcomeWaitingOn = quickJsOutcome.waiting_on_stack_run_id;
-    }
-    else {
-      log("info", `Identified generic service call: ${stackRun.service_name}.${stackRun.method_name}`);
-      resultPayload = await processServiceCall(stackRun);
-      outcomeStatus = 'completed';
-    }
-
-    const currentRunState = await getStackRun(stackRunId); // Refresh state
-    if (!currentRunState) {
-        log("error", `Stack run ${stackRunId} disappeared before outcome processing.`);
-        // Fallback status update
-        if (outcomeStatus === 'completed') await updateStackRunStatus(stackRunId, "completed", resultPayload);
-        else if (outcomeStatus === 'error') await updateStackRunStatus(stackRunId, "failed", null, outcomeErrorMessage || "Unknown error after run disappeared");
-        // If paused, state should have been set by QuickJS.
-        return { status: "error", error: "Stack run disappeared" };
-    }
-
-    if (outcomeStatus === 'completed') {
-      await completeStackRun(currentRunState, resultPayload);
-      return { status: "completed", result: resultPayload };
-    } else if (outcomeStatus === 'paused') {
-      log("info", `Task for stackRun ${stackRunId} paused, waiting on ${outcomeWaitingOn}.`);
-      // The QuickJS function should have updated the currentRunState to 'waiting_on_stack_run_id'.
-      // If not, we might need to do it here based on outcomeWaitingOn.
-      // For now, assume QuickJS did its job.
-      return { status: "paused" };
-    } else if (outcomeStatus === 'error') {
-      await failStackRun(currentRunState, outcomeErrorMessage || "Unknown QuickJS execution error");
-      return { status: "failed", error: outcomeErrorMessage };
+      const result = await processGapiCall(stackRun);
+      await completeStackRun(stackRun, result);
+      return { status: 'completed', result };
+    } else if (stackRun.vm_state && stackRun.vm_state.taskCode && stackRun.vm_state.taskName) {
+      log("info", `Processing VM task execution: ${stackRun.vm_state.taskName}`);
+      const taskResult = await processTaskExecution(stackRun);
+      
+      if (taskResult.status === 'completed') {
+        await completeStackRun(stackRun, taskResult.result);
+      } else if (taskResult.status === 'paused') {
+        log("info", `Task paused, waiting on ${taskResult.waiting_on_stack_run_id}`);
+      } else if (taskResult.status === 'error') {
+        await failStackRun(stackRun, taskResult.error || "Unknown error");
+      }
+      
+      return taskResult;
+    } else if (stackRun.method_name === 'tasks.execute' && stackRun.args) {
+      const taskName = stackRun.args[0];
+      const taskInput = stackRun.args[1] || {};
+      log("info", `Executing task via tasks.execute: ${taskName}`);
+      
+      const tasksResponse = await fetch(`${SUPABASE_URL}/functions/v1/tasks`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`
+        },
+        body: JSON.stringify({
+          task: taskName,
+          input: taskInput,
+          parent_stack_run_id: stackRun.id,
+          taskRunId: stackRun.parent_task_run_id
+        })
+      });
+      
+      const tasksResponseData = await tasksResponse.json();
+      if (!tasksResponse.ok) {
+        const errorMsg = `Error executing task via /tasks: ${tasksResponse.status} ${tasksResponse.statusText}`;
+        log("error", errorMsg);
+        await failStackRun(stackRun, errorMsg);
+        return { status: 'error', error: errorMsg };
+      }
+      
+      const result = tasksResponseData.result !== undefined ? tasksResponseData.result : tasksResponseData;
+      await completeStackRun(stackRun, result);
+      return { status: 'completed', result };
     } else {
-        log("error", `Unknown outcome status '${outcomeStatus}' for stack run ${stackRunId}. Failing.`);
-        await failStackRun(currentRunState, `Unknown outcome status: ${outcomeStatus}`);
-        return { status: "failed", error: `Unknown outcome status: ${outcomeStatus}` };
+      const errorMsg = `Invalid stack run configuration for ${stackRun.id}: no valid execution path`;
+      log("error", errorMsg);
+      await failStackRun(stackRun, errorMsg);
+      return { status: 'error', error: errorMsg };
     }
-
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     log("error", `Error processing stack run ${stackRunId}: ${errorMessage}`);
-    const currentRunState = await getStackRun(stackRunId); // Refresh state
+    const currentRunState = await getStackRun(stackRunId);
     if (currentRunState) {
         await failStackRun(currentRunState, errorMessage);
     } else {
@@ -279,7 +270,6 @@ async function processStackRun(stackRunId: string): Promise<any> {
     }
     return { status: "failed", error: errorMessage };
   } finally {
-    // Ensure the queue processing continues.
     await processPendingStackRuns();
   }
 }
@@ -290,16 +280,19 @@ async function processStackRun(stackRunId: string): Promise<any> {
 async function processTaskExecution(stackRun: any): Promise<{status: 'completed' | 'paused' | 'error', result?: any, error?: string, waiting_on_stack_run_id?: string}> {
   try {
     const requestBody: any = {};
-    if (stackRun.vm_state && stackRun.vm_state.task_code && stackRun.vm_state.task_name) {
-      log("info", `Using VM state to execute task: ${stackRun.vm_state.task_name} (StackRunID: ${stackRun.id}, TaskRunID: ${stackRun.parent_task_run_id})`);
-      requestBody.code = stackRun.vm_state.task_code;
-      requestBody.input = stackRun.vm_state.input || {};
-      requestBody.taskName = stackRun.vm_state.task_name;
-      requestBody.stackRunId = stackRun.id; // Pass current stackRunId for QuickJS to manage
-      requestBody.taskRunId = stackRun.parent_task_run_id; // Pass parent_task_run_id for linking
+    if (stackRun.vm_state && stackRun.vm_state.taskCode && stackRun.vm_state.taskName) {
+      log("info", `Using VM state to execute task: ${stackRun.vm_state.taskName} (StackRunID: ${stackRun.id}, TaskRunID: ${stackRun.parent_task_run_id})`);
+      requestBody.taskCode = stackRun.vm_state.taskCode;
+      requestBody.taskName = stackRun.vm_state.taskName;
+      requestBody.taskInput = stackRun.vm_state.taskInput || {};
+      requestBody.stackRunId = stackRun.id;
+      requestBody.taskRunId = stackRun.parent_task_run_id;
        // If vm_state contains last_call_result, it's a resumption hint for QuickJS
       if (stackRun.vm_state.last_call_result !== undefined) {
-        requestBody.last_call_result = stackRun.vm_state.last_call_result;
+        requestBody.initialVmState = {
+          ...stackRun.vm_state,
+          resume_payload: stackRun.vm_state.last_call_result
+        };
         log("info", `Forwarding last_call_result for resumption of ${stackRun.id}`);
       }
     } else if (stackRun.method_name === 'tasks.execute' && stackRun.args) {
@@ -370,6 +363,18 @@ async function processTaskExecution(stackRun: any): Promise<{status: 'completed'
     }
     
     log("info", `QuickJS response for ${stackRun.id}: ${simpleStringify(quickJsResponseData)}`);
+
+    // CRITICAL FIX: Check if QuickJS returned a suspension response
+    if (quickJsResponseData.result && quickJsResponseData.result.__hostCallSuspended === true) {
+      const childStackRunId = quickJsResponseData.result.stackRunId;
+      log("info", `QuickJS suspended ${stackRun.id}, waiting on child service call ${childStackRunId}`);
+      
+      // NOTE: Do NOT update the parent stack run here - it will be updated automatically 
+      // when the child service call is saved by the VM state manager
+      // The VM state manager handles the parent-child relationship setup correctly
+      
+      return { status: 'paused', waiting_on_stack_run_id: childStackRunId };
+    }
 
     if (quickJsResponseData.status === 'completed') {
       return { status: 'completed', result: quickJsResponseData.result };
@@ -1106,13 +1111,44 @@ async function resumeTaskFromVM(stackRunId: string, childResult: any): Promise<a
 }
 
 // ** NEW HELPER FUNCTIONS **
-async function completeStackRun(stackRun: any, result: any) {
+async function completeStackRun(stackRun: any, result: any, processedStackRuns: Set<string> = new Set()) {
+  // Prevent infinite loops by tracking processed stack runs
+  if (processedStackRuns.has(stackRun.id)) {
+    log("warn", `Avoiding infinite loop: stack run ${stackRun.id} already processed in this completion chain`);
+    return;
+  }
+  
+  // Add this stack run to processed set
+  processedStackRuns.add(stackRun.id);
+  
   await updateStackRunStatus(stackRun.id, "completed", result);
   log("info", `Stack run ${stackRun.id} (TaskRunID: ${stackRun.parent_task_run_id}) completed.`);
 
-  if (stackRun.parent_task_run_id) {
-    log("info", `Updating parent task_run ${stackRun.parent_task_run_id} for completed stack_run ${stackRun.id}`);
-    await updateTaskRun(stackRun.parent_task_run_id, result, 'completed');
+  // CRITICAL FIX: Only complete the task_run if this is a TASK EXECUTION, not a SERVICE CALL
+  // Service calls should resume their parent VM, not complete the task
+  const isServiceCall = stackRun.service_name && (stackRun.service_name === "gapi" || stackRun.service_name === "openai" || stackRun.service_name === "websearch" || stackRun.service_name === "keystore" || stackRun.service_name === "database");
+  const isTaskExecution = stackRun.vm_state && stackRun.vm_state.taskCode && stackRun.vm_state.taskName;
+  
+  if (isServiceCall) {
+    log("info", `Stack run ${stackRun.id} is a service call (${stackRun.service_name}), not completing task_run directly`);
+    // Service calls should not complete the task - they should resume their parent VM
+    // The task completion will happen when the parent VM naturally completes
+  } else if (isTaskExecution) {
+    log("info", `Stack run ${stackRun.id} is a task execution, completing task_run ${stackRun.parent_task_run_id}`);
+    if (stackRun.parent_task_run_id) {
+      await updateTaskRun(stackRun.parent_task_run_id, result, 'completed');
+    }
+  } else {
+    log("info", `Stack run ${stackRun.id} type unclear, completing task_run ${stackRun.parent_task_run_id} (fallback behavior)`);
+    if (stackRun.parent_task_run_id) {
+      await updateTaskRun(stackRun.parent_task_run_id, result, 'completed');
+    }
+  }
+
+  // Check recursion depth limit
+  if (processedStackRuns.size >= 10) {
+    log("error", `Recursion depth limit reached (${processedStackRuns.size}), stopping completion propagation to prevent infinite loop`);
+    return;
   }
 
   // Check if any parent stack_run was waiting for this one to complete
@@ -1126,7 +1162,14 @@ async function completeStackRun(stackRun: any, result: any) {
     log("error", `Error finding parent waiting on ${stackRun.id}: ${parentError.message}`);
   } else if (parentRuns && parentRuns.length > 0) {
     const parentStackRunToResume = parentRuns[0];
-    log("info", `Child stack run ${stackRun.id} completed. Resuming parent stack run ${parentStackRunToResume.id}.`);
+    
+    // Check if this would create a cycle
+    if (processedStackRuns.has(parentStackRunToResume.id)) {
+      log("error", `Detected parent-child cycle: parent ${parentStackRunToResume.id} already in completion chain, stopping propagation`);
+      return;
+    }
+    
+    log("info", `Child stack run ${stackRun.id} completed. Resuming parent stack run ${parentStackRunToResume.id} (depth: ${processedStackRuns.size})`);
     
     // resumeParentStackRun updates status to 'ready_to_resume' and stores child result appropriately
     await resumeParentStackRun(parentStackRunToResume.id, stackRun.id, result); 
@@ -1140,13 +1183,24 @@ async function completeStackRun(stackRun: any, result: any) {
         const resumeErrorMsg = e_resume instanceof Error ? e_resume.message : String(e_resume);
         log("error", `Failed to trigger resume for parent ${parentStackRunToResume.id} after child ${stackRun.id} completed: ${resumeErrorMsg}`);
         // If resumeTaskFromVM fails, it should handle failing the parentStackRunToResume itself.
+        // But let's avoid infinite recursion by not calling failStackRun again
+        await updateStackRunStatus(parentStackRunToResume.id, "failed", null, resumeErrorMsg);
     }
   } else {
     log("info", `No parent stack run found waiting on completed child ${stackRun.id}. This may be the end of a chain or a standalone run.`);
   }
 }
 
-async function failStackRun(stackRun: any, errorMessage: string | object) {
+async function failStackRun(stackRun: any, errorMessage: string | object, processedStackRuns: Set<string> = new Set()) {
+  // Prevent infinite loops by tracking processed stack runs
+  if (processedStackRuns.has(stackRun.id)) {
+    log("warn", `Avoiding infinite loop: stack run ${stackRun.id} already processed in this failure chain`);
+    return;
+  }
+  
+  // Add this stack run to processed set
+  processedStackRuns.add(stackRun.id);
+  
   const errorObject = typeof errorMessage === 'string' ? { message: errorMessage } : errorMessage;
   // Ensure that the error message passed to updateStackRunStatus is a string.
   const statusErrorMessage = typeof errorObject === 'string' ? errorObject : (errorObject as any).message || simpleStringify(errorObject);
@@ -1164,6 +1218,12 @@ async function failStackRun(stackRun: any, errorMessage: string | object) {
   }
 
   // Propagate failure to any parent stack_run that was waiting for this one
+  // BUT LIMIT THE RECURSION DEPTH TO PREVENT INFINITE LOOPS
+  if (processedStackRuns.size >= 10) {
+    log("error", `Recursion depth limit reached (${processedStackRuns.size}), stopping failure propagation to prevent infinite loop`);
+    return;
+  }
+
   const { data: parentRuns, error: parentError } = await supabase
     .from("stack_runs")
     .select("*") // Select all fields for recursive call
@@ -1174,9 +1234,18 @@ async function failStackRun(stackRun: any, errorMessage: string | object) {
     log("error", `Error finding parent waiting on failed child ${stackRun.id}: ${parentError.message}`);
   } else if (parentRuns && parentRuns.length > 0) {
     const parentStackRunToFail = parentRuns[0];
-    log("info", `Child stack run ${stackRun.id} failed. Recursively failing parent stack run ${parentStackRunToFail.id}.`);
+    
+    // Check if this would create a cycle
+    if (processedStackRuns.has(parentStackRunToFail.id)) {
+      log("error", `Detected parent-child cycle: parent ${parentStackRunToFail.id} already in failure chain, stopping propagation`);
+      return;
+    }
+    
+    log("info", `Child stack run ${stackRun.id} failed. Propagating failure to parent stack run ${parentStackRunToFail.id} (depth: ${processedStackRuns.size})`);
     const parentErrorMessage = `Parent failed because child stack run ${stackRun.id} failed: ${(errorObject as any).message || simpleStringify(errorObject)}`;
-    await failStackRun(parentStackRunToFail, parentErrorMessage); // Recursive call
+    
+    // Pass the processedStackRuns set to prevent cycles
+    await failStackRun(parentStackRunToFail, parentErrorMessage, processedStackRuns);
   }
 }
 // ** END OF NEW HELPER FUNCTIONS **
