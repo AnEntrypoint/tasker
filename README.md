@@ -1054,581 +1054,6 @@ Key features:
 - module_name: Name of service module
 - method_name: Name of method being called
 - args: JSON array of arguments
-- status: 'pending', 'processing', 'completed', 'failed', etc.
-- result: JSON result data
-- created_at, updated_at: Timestamps
-
-### Triggers and Processing
-
-The system uses database triggers to notify the stack processor when new stack runs are created:
-
-```sql
-CREATE OR REPLACE FUNCTION process_next_stack_run() RETURNS TRIGGER AS $$
-BEGIN
-    -- Only process runs that are in 'pending' status
-    IF NEW.status = 'pending' THEN
-        -- Send request to the quickjs edge function
-        PERFORM extensions.http_post(
-            CONCAT(current_setting('app.settings.supabase_url', TRUE), '/functions/v1/quickjs'),
-            jsonb_build_object('stackRunId', NEW.id),
-            'application/json',
-            jsonb_build_object(
-                'Authorization', concat('Bearer ', current_setting('app.settings.service_role_key', TRUE)),
-                'Content-Type', 'application/json'
-            ),
-            60000 -- 60s timeout
-        );
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Create trigger to process stack runs
-CREATE TRIGGER process_stack_run_insert
-AFTER INSERT ON stack_runs
-FOR EACH ROW
-EXECUTE FUNCTION process_next_stack_run();
-```
-
-### Handling Nested Calls
-
-When a task calls another task, the system:
-
-1. Creates a unique stack run ID
-2. Saves VM state and call details to `stack_runs`
-3. Returns a suspension marker to the VM
-4. When the child task completes, resumes parent execution
-
-The VM proxies trap method calls using JavaScript Proxy objects:
-
-```javascript
-// Inside VM, tools.tasks.execute is trapped by proxy
-const result = await tools.tasks.execute('nested-task', { param: 'value' });
-// Execution pauses here until nested task completes
-console.log('Resumed with result:', result);
-```
-
-## Limitations and Considerations
-
-- Complex nested calls may require careful error handling
-- Very deep call hierarchies could impact performance
-- Async operations require proper implementation in QuickJS
-- Database triggers must be configured correctly for processing
-
-## Example Task
-
-```javascript
-/**
- * A sample task demonstrating nested calls
- * @param {Object} input - The input parameters
- * @returns {Object} The task result
- */
-export default async function(input, context) {
-  console.log("Starting parent task");
-  
-  // Call a nested task
-  const nestedResult = await context.tools.tasks.execute('nested-task', {
-    param: input.someParam
-  });
-  
-  // Task execution pauses here until nested-task completes
-  console.log("Resumed parent task with nested result:", nestedResult);
-  
-  // Use result from nested task
-  return {
-    original: input,
-    nested: nestedResult,
-    combined: `${input.someParam}-${nestedResult.value}`
-  };
-}
-```
-
-## Conclusion
-
-The ephemeral execution model enables complex, nested task workflows while maintaining performance and reliability. By separating persistent task runs from ephemeral stack runs, the system provides a robust foundation for sophisticated content generation and processing pipelines.
-
-## Current Status
-
-- We've successfully created test tasks and published them to the database
-- We've created test scripts to verify the ephemeral call behavior 
-- We've implemented a tool to check stack runs in the database
-
-## Findings
-
-1. Currently, tasks are executing synchronously without using the ephemeral call queueing system
-2. Calls to `tools.tasks.execute()` in our tasks are not being intercepted by the system
-3. The stack_runs table contains various completed and processing entries, but none for our new test tasks
-4. No task_runs records are being created for our test task executions
-
-## Possible Issues
-
-1. The QuickJS environment may not be properly intercepting and saving nested calls to the stack_runs table
-2. The __saveEphemeralCall__ function in QuickJS might not be correctly implemented or connected
-3. The VM state isn't being saved when nested calls are encountered
-4. The stack processor might not be processing pending stack runs correctly
-
-## Next Steps
-
-1. **Investigate QuickJS Configuration**:
-   - Check the QuickJS executor implementation in supabase/functions/quickjs/index.ts
-   - Verify that promise handling is correctly implemented with newAsyncContext()
-   - Ensure that tools.tasks.execute is being properly intercepted
-
-2. **Verify Database Setup**:
-   - Check the stack_runs and task_runs table schemas
-   - Ensure proper indexes are set up for efficient querying
-
-3. **Check Ephemeral Call Implementation**:
-   - Verify the implementation of __saveEphemeralCall__ in the QuickJS environment
-   - Check how VM state is being saved when nested calls are encountered
-
-4. **Test Stack Processor**:
-   - Manually create a stack_run record and see if it gets processed
-   - Verify database triggers are set up correctly
-
-## Implementation Tasks
-
-1. **QuickJS Executor Enhancement**:
-   - Implement proper interception of tools.tasks.execute calls
-   - Ensure VM state is correctly saved when nested calls are encountered
-
-2. **Task Execution Workflow Update**:
-   - Modify executeTask function to create task_runs records
-   - Return task run IDs immediately rather than waiting for results
-
-3. **Stack Processor Improvements**:
-   - Enhance the stack processor to handle nested calls efficiently
-   - Implement better error handling and recovery
-   
-4. **Testing Utilities**:
-   - Create additional test tasks with different levels of nesting
-   - Implement better monitoring and diagnostic tools
-
-## Recommended Testing Steps
-
-1. Manually create a stack_run record for testing
-2. Monitor the stack processor behavior using check-stack-runs.js
-3. Validate the ephemeral call queueing through simple test tasks
-4. Test more complex nested call patterns once basic functionality is working
-
-## Problem Background
-
-The Tasker system uses an ephemeral call queueing system to handle nested task execution, with each call being saved to the `stack_runs` table and then processed asynchronously. However, GAPI integration has been facing issues with:
-
-1. Stack runs getting stuck in "pending" or "in_progress" states
-2. Task runs not being updated with results from completed GAPI calls
-3. Parent stack runs not being properly resumed after child GAPI calls complete
-
-## Solution Components
-
-We've created several tools to address these issues:
-
-### 1. Direct GAPI Processor (`process-direct-gapi.ts`)
-
-This script directly processes pending GAPI stack runs by:
-
-- Finding all GAPI stack runs in pending/in_progress state
-- Making direct calls to the `wrappedgapi` edge function
-- Updating stack runs with results
-- Properly updating parent stack runs and task runs
-
-```bash
-deno run -A process-direct-gapi.ts
-```
-
-### 2. GAPI Monitor (`gapi-monitor.ts`)
-
-A monitoring script that can be scheduled to run periodically to:
-
-- Check for and process pending GAPI stack runs
-- Identify and fix stuck task runs
-- Make direct GAPI calls as a fallback
-- Run continuously for a configured duration
-- Log all activities to a file
-
-```bash
-deno run -A gapi-monitor.ts
-```
-
-### 3. Stack Processor Fix (`fix-stack-processor.ts`)
-
-This script fixes linter errors in the stack processor implementation:
-
-- Updates outdated import URLs
-- Fixes method name mismatches
-- Corrects parameter type issues
-- Creates a patched version of the file
-
-```bash
-deno run --allow-read --allow-write fix-stack-processor.ts
-```
-
-### 4. Cron Job Script (`cron-gapi-monitor.sh`)
-
-A shell script to automate the monitoring process:
-
-- Runs both the GAPI monitor and direct processor
-- Can be scheduled via cron
-- Logs all output
-
-## How It Works
-
-1. When a task calls the Google API through the `__callHostTool__` function, an entry is created in the `stack_runs` table with status "pending".
-
-2. The GAPI monitor periodically checks for pending stack runs, processes them by making direct API calls to `wrappedgapi`, and updates the results.
-
-3. For parent stack runs that were waiting on GAPI calls, the monitor updates their VM state and sets them to "ready_to_resume", then triggers the stack processor to resume them.
-
-4. For task runs associated with GAPI calls, the monitor ensures they are updated with the final results.
-
-5. As a fallback, the direct processor is also run periodically to handle any runs that might have been missed by the monitor.
-
-If issues persist:
-
-1. Check the logs in `./logs/gapi-monitor.log`
-2. Run the direct processor manually: `deno run -A process-direct-gapi.ts`
-3. Verify that the `wrappedgapi` edge function is working: 
-   ```bash
-   deno run -A check-direct-gapi.ts
-   ```
-4. Check for any stuck tasks or stack runs: 
-   ```bash
-   deno run -A check-gapi-stack-runs.ts
-   ```
-
-## Key Concepts
-
-1. **Module Calls and VM Suspension**: All service calls (including GAPI) should cause the QuickJS VM to suspend execution, save state, and resume after the call completes. These are not traditional JavaScript promises but rather VM suspension points.
-
-2. **Method Path Arrays**: To reliably call GAPI services, use arrays of path segments rather than property chains. For example, use `["admin", "domains", "list"]` instead of `gapi.admin.domains.list`.
-
-3. **Standard Helpers**: Use the shared helper modules in `taskcode/shared/gapi-helper.js` for consistent and reliable GAPI integration.
-
-### Issue 1: Nested Property Access
-
-**Problem**: The QuickJS environment doesn't properly build method chains when using nested property access like `gapi.admin.domains.list`.
-
-**Solution**: Use the direct `__callHostTool__` approach or the `gapi-helper` module:
-
-```javascript
-// Direct approach
-const result = await __callHostTool__("gapi", ["admin", "domains", "list"], [{ customer: "my_customer" }]);
-
-// Helper module approach
-const gapiHelper = await context.tasks.require("../shared/gapi-helper");
-const result = await gapiHelper.callGapiService(context, ["admin", "domains", "list"], [{ customer: "my_customer" }]);
-```
-
-### Issue 2: Promise Handling
-
-**Problem**: QuickJS requires explicit job processing for promises, which can cause async operations to hang if not handled properly.
-
-**Solution**: Using the VM suspension mechanism instead of direct promises ensures proper handling:
-
-```javascript
-// This will create a VM suspension point
-const result = await __callHostTool__("gapi", ["admin", "domains", "list"], [{ customer: "my_customer" }]);
-```
-
-## Task Template
-
-Here's a template for building tasks that integrate with GAPI:
-
-```javascript
-/**
- * @task my-gapi-task
- * @description Example task using GAPI integration
- * @param {object} input - Input parameters
- * @returns {object} Result object
- */
-module.exports = async function execute(input, context) {
-  console.log("Starting my-gapi-task");
-  
-  try {
-    // Load the helper
-    let gapiHelper;
-    try {
-      gapiHelper = await context.tasks.require("../shared/gapi-helper");
-    } catch (error) {
-      // Use the direct approach if the helper isn't available
-      return await directApproach(input, context);
-    }
-    
-    // Call GAPI methods using the helper
-    const result = await gapiHelper.callGapiService(
-      context,
-      ["admin", "domains", "list"],
-      [{ customer: input.customer || "my_customer" }]
-    );
-    
-    // Process and return the result
-    return {
-      success: true,
-      data: result
-    };
-  } catch (error) {
-    console.error("Error:", error.message);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-};
-
-// Fallback approach without helper
-async function directApproach(input, context) {
-  try {
-    const result = await __callHostTool__(
-      "gapi", 
-      ["admin", "domains", "list"], 
-      [{ customer: input.customer || "my_customer" }]
-    );
-    
-    return {
-      success: true,
-      data: result
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-}
-```
-
-## Important Notes
-
-1. **VM State**: The QuickJS VM state is preserved between suspensions, allowing for sequential API calls.
-2. **Task Context**: The context object provides access to the tools and tasks objects.
-3. **Logging**: Use console.log/error in tasks for debugging; these are captured in task logs.
-4. **Testing**: Use the provided CLI tools for testing GAPI integration directly.
-5. **Service Role**: GAPI calls use the service role key for authentication. 
-
-When working with Google Admin SDK API:
-
-1. **Always use `"my_customer"` (not an email)**: When referring to the customer that the authenticated admin belongs to, always use the string `"my_customer"`, not the admin email address.
-
-2. **Email addresses are not valid customer IDs**: Using an email address as a customer ID will result in a 400 Bad Request error from the Google API.
-
-3. **Customer IDs for multi-tenant situations**: Only use specific customer ID values for multi-tenant situations where you're managing multiple Google Workspace domains.
-
-## Direct Implementation for Performance Critical Operations
-
-For performance-critical operations, the service includes direct implementations that bypass the SDK abstraction. Currently, the following operations have direct implementations:
-
-- `admin.domains.list` - Directly calls the Admin API to list domains
-
-## Status and Management Endpoints
-
-The service includes several status and management endpoints:
-
-- `GET /wrappedgapi/health` - Returns health status and token cache size
-- `POST /wrappedgapi` with `method: "checkCredentials"` - Checks if credentials are properly loaded
-- `POST /wrappedgapi` with `method: "getTokenInfo"` - Returns info about currently cached tokens
-- `POST /wrappedgapi` with `method: "clearTokenCache"` - Clears the token cache (all tokens or specific scope)
-
-## Configuration
-
-The service requires the following configuration in the keystore:
-
-- `global/GAPI_KEY` - Google service account credentials JSON
-- `global/GAPI_ADMIN_EMAIL` - Admin email address for domain-wide delegation
-
-Several test scripts are available to test the GAPI service:
-
-- `tests/gapi/test-gapi-health.ts` - Tests health and status endpoints
-- `tests/misc/test-keystore.ts` - Tests keystore access for credentials
-- `tests/gapi/test-gapi-domains-simple.ts` - Tests domains listing with `"my_customer"`
-
-The implementation includes several optimizations:
-
-1. **Token Caching**: Tokens are cached in memory with expiry tracking
-2. **Direct API Implementations**: Performance-critical operations bypass the SDK abstraction
-3. **Simplified Authentication**: Uses service account with domain-wide delegation
-4. **Error Handling**: Detailed error reporting with full error context
-5. **Health Monitoring**: Includes health endpoint for monitoring
-
-These optimizations allow the service to work within Edge Function resource constraints while providing robust access to Google APIs.
-
-## Scripts
-
-### 1. `run-gapi-sleep-resume.js`
-
-One-step script that:
-- Executes the gapi-best-practice task
-- Polls for task completion or timeout
-- Processes any suspended GAPI calls
-- Makes a direct GAPI call and displays the domain list
-- Provides helpful error handling and fallbacks
-
-Usage:
-```
-deno run -A run-gapi-sleep-resume.js
-```
-
-or using the npm script:
-```
-npm run gapi:domains-direct
-```
-
-### 2. `process-suspended-gapi.ts`
-
-Utility script that:
-- Finds any suspended GAPI calls in the stack_runs table
-- Processes them with direct GAPI API calls
-- Updates parent stack runs that were waiting for results
-- Triggers the stack processor to resume
-- Always displays the domain list
-
-Usage:
-```
-deno run -A process-suspended-gapi.ts
-```
-
-### 3. `process-direct-gapi.ts`
-
-General-purpose utility that:
-- Processes all pending GAPI stack runs with direct API calls
-- Updates parent stack runs and task runs with results
-- Includes error handling and automatic retries
-
-Usage:
-```
-deno run -A process-direct-gapi.ts
-```
-
-### Stack Runs Table Structure
-
-The stack_runs table contains the following important columns used by this solution:
-- `id`: Unique ID for the stack run
-- `parent_run_id`: ID of the parent stack run, if any
-- `parent_task_run_id`: ID of the associated task run
-- `method_path`: Array of strings representing the GAPI method path
-- `method_name`: The specific method being called (e.g., "list")
-- `status`: Current status (pending, in_progress, completed, failed)
-- `vm_state`: JSON representation of the VM state when suspended
-- `result`: The result of the GAPI call when completed
-
-### The GAPI Call Suspension Process
-
-1. `gapi-best-practice.js` task calls `__callHostTool__("gapi", ["admin", "domains", "list"], [{ customer }])`
-2. The QuickJS VM creates a stack run with status "pending" and suspends execution
-3. The VM state is saved to the database, including the current call context
-4. The stack processor attempts to process the GAPI call
-
-### Manual Processing
-
-If the stack processor doesn't complete the GAPI call automatically, our utility scripts:
-1. Find suspended/pending GAPI calls in the stack_runs table
-2. Make direct calls to the GAPI API through the wrappedgapi edge function
-3. Update the stack run with the result and status "completed"
-4. Update any parent runs that were waiting for the result with the vm_state.last_call_result set
-5. Trigger the stack processor to resume execution of parent tasks
-
-## Domain List Display
-
-All scripts display the Google Workspace domain list in a formatted way:
-
-```
-=== DOMAIN LIST (4 domains) ===
-
-Domain 1: example.com
-   - Primary: Yes
-   - Verified: Yes
-   - Created: 12/22/2022, 11:46:28 AM
-
-Domain 2: example.org
-   - Primary: No
-   - Verified: Yes
-   - Created: 12/22/2022, 12:00:44 PM
-
-...
-
-=== END OF DOMAIN LIST ===
-```
-
-## Usage Options
-
-1. **One-step run with domain list**:
-   ```
-   npm run gapi:domains-direct
-   ```
-
-2. **Traditional GAPI sleep-resume process**:
-   ```
-   npm run gapi:sleep-resume
-   ```
-   followed by processing suspended calls:
-   ```
-   deno run -A process-suspended-gapi.ts
-   ```
-
-3. **Direct GAPI call for domain list only**:
-   ```
-   deno run -A process-direct-gapi.ts
-   ```
-
-If you encounter issues:
-
-1. Make sure Supabase Edge Functions are running:
-   ```
-   npm run gapi:serve
-   ```
-
-2. Check for stuck or pending stack runs:
-   ```
-   deno run -A process-suspended-gapi.ts
-   ```
-
-3. Run a direct GAPI call to verify API access:
-   ```
-   deno run -A process-direct-gapi.ts
-   ```
-
-4. Check the logs for error messages
-
-## Components
-
-### 1. VM State Manager
-
-The VM state manager in `supabase/functions/quickjs/vm-state-manager.ts` provides utilities for:
-
-- Generating UUIDs for stack runs
-- Capturing VM state before suspension
-- Saving stack runs to the database
-- Triggering the stack processor
-- Restoring VM state from a stack run
-
-### 2. Service Proxy Generator
-
-The proxy generator in `supabase/functions/quickjs/proxy-generator.ts` intercepts service calls by:
-
-- Creating a proxy object that captures method calls
-- Special handling for `tasks.execute` calls
-- Saving stack runs and returning promises for async operations
-
-### 3. Stack Processor
-
-The stack processor in `supabase/functions/stack-processor/index.ts` processes pending stack runs by:
-
-- Finding and processing pending stack runs
-- Executing tasks or service calls
-- Updating stack run status
-- Resuming parent stack runs with results from children
-- Chaining to the next pending run
-
-### 4. Database Tables
-
-The system uses two primary tables:
-
-**stack_runs**: Tracks execution state of function calls
-- id: UUID primary key
-- parent_stack_run_id: Reference to parent stack run
-- parent_task_run_id: Reference to parent task run
-- service_name: Service being called (e.g., "tasks")
-- method_name: Method being called (e.g., "execute")
-- args: JSON array of arguments
 - status: Current status ("pending", "processing", "completed", "error", etc.)
 - created_at/updated_at: Timestamps
 - result: Result of the execution
@@ -2095,3 +1520,118 @@ To prevent resource exhaustion:
 - [QuickJS Documentation](https://bellard.org/quickjs/quickjs.html)
 - [Supabase Edge Functions](https://supabase.com/docs/guides/functions)
 - [Google Identity Platform](https://developers.google.com/identity)
+
+## Comprehensive Gmail Search CLI
+
+The comprehensive Gmail search demonstrates the full power of the Tasker system with multi-step workflows that suspend and resume across external API calls.
+
+### Usage
+
+```bash
+# Basic search across all Google Workspace domains
+npm run test:comprehensive-gmail-search
+
+# Search for specific content
+npm run test:comprehensive-gmail-search -- --query "subject:meeting"
+npm run test:comprehensive-gmail-search -- --query "from:john@company.com"
+npm run test:comprehensive-gmail-search -- --query "has:attachment"
+
+# Limit scope for faster results
+npm run test:comprehensive-gmail-search -- --maxUsersPerDomain 2 --maxResultsPerUser 1
+
+# Direct execution (bypasses npm)
+node comprehensive-gmail-search-cli.js --query "in:sent" --maxUsersPerDomain 1
+```
+
+### What it does
+
+1. 🏢 **Discovers all Google Workspace domains** automatically
+2. 👥 **Lists users for each domain** 
+3. 📧 **Searches Gmail for each user** with your query
+4. 📊 **Aggregates results** across all domains and users
+5. ⏸️ **Demonstrates VM suspend/resume** during external API calls
+
+### Options
+
+- `--query, -q <query>` - Gmail search query (default: "in:inbox")
+- `--maxResultsPerUser <number>` - Max email results per user (default: 3)
+- `--maxUsersPerDomain <number>` - Max users to process per domain (default: 5)
+- `--help, -h` - Show help message
+
+### Example Output
+
+```
+🚀 Comprehensive Gmail Search CLI
+=================================
+📧 Search Query: "subject:meeting"
+👥 Max Users Per Domain: 2
+📋 Max Results Per User: 1
+🌐 Target: All Google Workspace domains
+
+⏳ Initializing services...
+📤 Submitting comprehensive Gmail search task...
+✅ Task submitted successfully!
+📋 Task Run ID: abc123...
+
+🔄 Monitoring comprehensive search progress...
+[10s] ⚙️ Status: PROCESSING
+[15s] ⏸️ Status: SUSPENDED
+       🔗 Waiting on: 9546a14e-225b...
+       💾 VM state preserved - external API call in progress
+
+🎉 COMPREHENSIVE GMAIL SEARCH COMPLETED SUCCESSFULLY!
+===================================================
+📊 Execution Summary:
+   🏢 Domains processed: 4
+   👥 Users processed: 8
+   📧 Total emails found: 12
+   ⏱️ Processing time: 45.2s
+   🔍 Search query: "subject:meeting"
+
+📋 Results by Domain:
+   1. 🏢 l-inc.co.za:
+      👥 Users searched: 2
+      📧 Emails found: 4
+         1. 👤 john@l-inc.co.za: 2 emails
+         2. 👤 jane@l-inc.co.za: 2 emails
+   2. 🏢 beecompliant.net:
+      👥 Users searched: 2
+      📧 Emails found: 3
+         1. 👤 admin@beecompliant.net: 1 emails
+         2. 👤 support@beecompliant.net: 2 emails
+```
+
+### Technical Features
+
+✅ **Multi-step workflow** completed end-to-end  
+✅ **VM suspend/resume mechanism** functioned perfectly  
+✅ **State preserved** across multiple external API calls  
+✅ **Results properly aggregated** from all sources  
+
+This demonstrates the Tasker system's ability to handle complex workflows with multiple external API calls while maintaining state across VM suspensions.
+
+## Setup
+
+1. Start Supabase services:
+   ```bash
+   npm run gapi:serve
+   ```
+
+2. Run the comprehensive Gmail search:
+   ```bash
+   npm run test:comprehensive-gmail-search
+   ```
+
+## Development
+
+- Publish tasks: `npm run publish:task`
+- Test individual services: `npm run keystore`, `npm run gapi`
+- Monitor with concurrently: All CLI commands use concurrently to start services automatically
+
+## Architecture
+
+- **QuickJS**: Secure JavaScript execution environment
+- **Supabase Edge Functions**: Serverless function hosting
+- **Service Proxies**: Integration layer for external APIs (Google, OpenAI, etc.)
+- **VM State Management**: Persistent state across suspensions
+- **Ephemeral Queuing**: Background task execution with stack runs

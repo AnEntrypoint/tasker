@@ -5,7 +5,7 @@
   "main": "blog-generator-cli.js",
   "scripts": {
     "blog": "deno run -A test-blog-generator.js",
-    "keystore": "deno run -A tests/live/test-live-keystore.ts",
+    "keystore": "concurrently --kill-others \"supabase functions serve --no-verify-jwt wrappedkeystore\" \"deno run -A backupscripts/test-live-keystore.ts\"",
     "pre-gapi": "supabase db reset --confirm ; supabase start",
     "gapi": "deno run -A tests/gapi/test-gapi-update.ts",
     "gapi:serve": "supabase functions serve --no-verify-jwt tasks stack-processor quickjs wrappedgapi wrappedkeystore",
@@ -13,6 +13,14 @@
     "gapi:list-domains": "concurrently --kill-others \"npm run gapi:serve\" \"npm run gapi:client\"",
     "test:suspend-resume": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-suspend-resume-service.ts\"",
     "test:suspend-resume-minimal": "concurrently --kill-others \"supabase functions serve --no-verify-jwt quickjs wrappedwebsearch stack-processor\" \"deno run --allow-net --allow-env --allow-read test-suspend-resume-minimal.ts\"",
+    "test:comprehensive-gmail-search": "concurrently --kill-others \"npm run gapi:serve\" \"node comprehensive-gmail-search-cli.js\"",
+    "test:comprehensive-gmail-search-all": "concurrently --kill-others \"npm run gapi:serve\" \"node comprehensive-gmail-search-all-cli.js\"",
+    "test:comprehensive-gmail-search-demo": "concurrently --kill-others \"npm run gapi:serve\" \"node comprehensive-gmail-search-demo-cli.js\"",
+    "test:long-timeout": "concurrently --kill-others \"npm run gapi:serve\" \"node test-long-timeout.js\"",
+    "test:edge-functions": "concurrently --kill-others \"npm run gapi:serve\" \"deno run -A test-edge-function-calls.ts\"",
+    "test:live-gmail": "node comprehensive-gmail-search-cli.js",
+    "test:live-supabase": "deno run --allow-net --allow-env test-live-supabase.ts",
+    "gsuite": "deno run -A gsuite-gmail-search-cli.js",
     "publish:task": "deno run -A taskcode/publish.ts --specific test-gapi-domains-service"
   },
   "dependencies": {
