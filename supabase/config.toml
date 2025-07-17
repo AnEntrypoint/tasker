@@ -2,19 +2,16 @@
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the
 # working directory name when running `supabase init`.
-project_id = "supabase"
-
-# A long-lived token for API requests. You can find this in your service account settings.
-# token = "{{ SERVICE_ROLE_KEY }}"
+project_id = "tasker"
 
 [api]
 enabled = true
 # Port to use for the API URL.
-port = 8000
+port = 8080
 # Schemas to expose in your API. Tables, views and stored procedures in this schema will get API
-# endpoints. public and storage are always included.
-schemas = ["public", "storage", "graphql_public"]
-# Extra schemas to add to the search_path of every request. public is always included.
+# endpoints. `public` and `graphql_public` schemas are included by default.
+schemas = ["public", "graphql_public"]
+# Extra schemas to add to the search_path of every request.
 extra_search_path = ["public", "extensions"]
 # The maximum number of rows returns from a view, table, or stored procedure. Limits payload size
 # for accidental or malicious requests.
@@ -26,26 +23,31 @@ enabled = false
 
 [db]
 # Port to use for the local database URL.
-port = 5432
-# Port used by psql to connect to Postgres.
-major_version = 15
+port = 55432
+# Port used by db diff command to initialize the shadow database.
+shadow_port = 54320
+# The database major version to use. This has to be the same as your remote database's. Run `SHOW
+# server_version;` on the remote database to check.
+major_version = 17
 
 [db.pooler]
-enabled = true
+enabled = false
 # Port to use for the local connection pooler.
 port = 54329
 # Specifies when a server connection can be reused by other clients.
 # Configure one of the supported pooler modes: `transaction`, `session`.
 pool_mode = "transaction"
 # How many server connections to allow per user/database pair.
-default_pool_size = 25
+default_pool_size = 20
 # Maximum number of client connections allowed.
-max_client_conn = 200
+max_client_conn = 100
 
 # [db.vault]
 # secret_key = "env(SECRET_VALUE)"
 
 [db.migrations]
+# If disabled, migrations will be skipped during a db push or reset.
+enabled = true
 # Specifies an ordered list of schema files that describe your database.
 # Supports glob patterns relative to supabase directory: "./schemas/*.sql"
 schema_paths = []
@@ -63,23 +65,22 @@ enabled = true
 # ip_version = "IPv6"
 # The maximum length in bytes of HTTP request headers. (default: 4096)
 # max_header_length = 4096
-# notify_quota_usage = 1000
 
 [studio]
 enabled = true
 # Port to use for Supabase Studio.
-port = 54321
+port = 55323
 # External URL of the API server that frontend connects to.
 api_url = "http://127.0.0.1"
+# OpenAI API Key to use for Supabase AI in the Supabase Studio.
+openai_api_key = "env(OPENAI_API_KEY)"
 
-# Email testing server. Emails sent with the local dev setup are not actually delivered - rather, they
-# are monitored, and you can view the emails that would have been delivered in the web interface.
+# Email testing server. Emails sent with the local dev setup are not actually sent - rather, they
+# are monitored, and you can view the emails that would have been sent from the web interface.
 [inbucket]
 enabled = true
 # Port to use for the email testing server web interface.
-port = 54324
-smtp_port = 54325
-pop3_port = 54326
+port = 55324
 # Uncomment to expose additional ports for testing user applications that send emails.
 # smtp_port = 54325
 # pop3_port = 54326
@@ -106,9 +107,9 @@ file_size_limit = "50MiB"
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://localhost:8000"
+site_url = "http://127.0.0.1:3000"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://localhost:8000"]
+additional_redirect_urls = ["https://127.0.0.1:3000"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # If disabled, the refresh token will never expire.
@@ -127,6 +128,22 @@ minimum_password_length = 6
 # Passwords that do not meet the following requirements will be rejected as weak. Supported values
 # are: `letters_digits`, `lower_upper_letters_digits`, `lower_upper_letters_digits_symbols`
 password_requirements = ""
+
+[auth.rate_limit]
+# Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
+email_sent = 2
+# Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
+sms_sent = 30
+# Number of anonymous sign-ins that can be made per hour per IP address. Requires enable_anonymous_sign_ins = true.
+anonymous_users = 30
+# Number of sessions that can be refreshed in a 5 minute interval per IP address.
+token_refresh = 150
+# Number of sign up and sign-in requests that can be made in a 5 minute interval per IP address (excludes anonymous users).
+sign_in_sign_ups = 30
+# Number of OTP / Magic link verifications that can be made in a 5 minute interval per IP address.
+token_verifications = 30
+# Number of Web3 logins that can be made in a 5 minute interval per IP address.
+web3 = 30
 
 # Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
 # [auth.captcha]
@@ -187,6 +204,11 @@ max_frequency = "5s"
 # Force log out if the user has been inactive longer than the specified duration.
 # inactivity_timeout = "8h"
 
+# This hook runs before a new user is created and allows developers to reject the request based on the incoming user object.
+# [auth.hook.before_user_created]
+# enabled = true
+# uri = "pg-functions://postgres/auth/before-user-created-hook"
+
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
 # enabled = true
@@ -239,6 +261,11 @@ url = ""
 # If enabled, the nonce check will be skipped. Required for local sign in with Google auth.
 skip_nonce_check = false
 
+# Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.
+# You can configure "web3" rate limit in the [auth.rate_limit] section and set up [auth.captcha] if self-hosting.
+[auth.web3.solana]
+enabled = false
+
 # Use Firebase Auth as a third-party provider alongside Supabase Auth.
 [auth.third_party.firebase]
 enabled = false
@@ -256,31 +283,28 @@ enabled = false
 # user_pool_id = "my-user-pool-id"
 # user_pool_region = "us-east-1"
 
+# Use Clerk as a third-party provider alongside Supabase Auth.
+[auth.third_party.clerk]
+enabled = false
+# Obtain from https://clerk.com/setup/supabase
+# domain = "example.clerk.accounts.dev"
+
 [edge_runtime]
 enabled = true
-# Configure the request handling policy for Edge Functions. Available options:
-# - `oneshot`: Recommended for development with hot reload support
-# - `per_worker`: Recommended for load testing scenarios (better for 1000+ calls)
-policy = "per_worker"
+# Configure one of the supported request policies: `oneshot`, `per_worker`.
+# Use `oneshot` for hot reload, or `per_worker` for load testing.
+policy = "oneshot"
 # Port to attach the Chrome inspector for debugging edge functions.
 inspector_port = 8083
+# The Deno major version to use.
+deno_version = 1
 
-# Use these configurations to customize your Edge Function.
-# [functions.MY_FUNCTION_NAME]
-# enabled = true
-# verify_jwt = true
-# import_map = "./functions/MY_FUNCTION_NAME/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-# entrypoint = "./functions/MY_FUNCTION_NAME/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/MY_FUNCTION_NAME/*.html" ]
+# [edge_runtime.secrets]
+# secret_key = "env(SECRET_VALUE)"
 
 [analytics]
-enabled = false
-port = 54327
-vector_port = 54328
+enabled = true
+port = 55327
 # Configure one of the supported backends: `postgres`, `bigquery`.
 backend = "postgres"
 
@@ -296,82 +320,3 @@ s3_region = "env(S3_REGION)"
 s3_access_key = "env(S3_ACCESS_KEY)"
 # Configures AWS_SECRET_ACCESS_KEY for S3 bucket
 s3_secret_key = "env(S3_SECRET_KEY)"
-
-[functions.wrappedopenai]
-enabled = true
-verify_jwt = true
-import_map = "./functions/wrappedopenai/deno.json"
-entrypoint = "./functions/wrappedopenai/index.ts"
-
-[functions.wrappedsupabase]
-enabled = true
-verify_jwt = true
-import_map = "./functions/wrappedsupabase/deno.json"
-entrypoint = "./functions/wrappedsupabase/index.ts"
-
-[functions.wrappedwebsearch]
-enabled = true
-verify_jwt = true
-import_map = "./functions/wrappedwebsearch/deno.json"
-entrypoint = "./functions/wrappedwebsearch/index.ts"
-
-[functions.wrappedkeystore]
-enabled = true
-verify_jwt = true
-import_map = "./functions/wrappedkeystore/deno.json"
-entrypoint = "./functions/wrappedkeystore/index.ts"
-
-[functions.quickjs]
-enabled = true
-verify_jwt = true
-import_map = "./functions/quickjs/deno.json"
-entrypoint = "./functions/quickjs/index.ts"
-
-[functions.tasks]
-enabled = true
-verify_jwt = true
-import_map = "./functions/tasks/deno.json"
-entrypoint = "./functions/tasks/index.ts"
-
-  
-
-# Convention-based Function Discovery and Registration
-# ----------------------------------------------------
-# Functions are automatically discovered and registered based on directory structure.
-# The system follows these conventions:
-#   - Each function must be in its own directory under supabase/functions
-#   - Function name is derived from the directory name
-#   - Entry point is index.ts or main.ts in the function directory
-#   - Function configuration is auto-detected from imports and usage
-#   - Runtime is auto-detected based on import statements
-#   - Schemas and methods are inferred from usage patterns
-#
-# Special directories and their purposes:
-# _shared: Contains shared code for functions (not registered as a function)
-# _middleware: Contains middleware modules for function request processing
-
-
-# The following section is for reference only - actual function registration is done automatically
-# based on directory structure and file content analysis. You can add manual configurations here
-# if needed, but they will be merged with auto-discovered functions.
-#
-# Example manual function configuration:
-# [[functions.user_defined]]
-# name = "custom-function"
-# verify_jwt = true
-# max_timeout = 60
-# import_map = "./import_map.json"
-# env_vars = ["ENV_VAR_1", "ENV_VAR_2"]
-
-# Note: default configuration for functions has been removed to prevent deployment errors
-
-[functions.wrappedgapi]
-enabled = true
-verify_jwt = true
-import_map = "./functions/wrappedgapi/deno.json"
-# Uncomment to specify a custom file path to the entrypoint.
-# Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
-entrypoint = "./functions/wrappedgapi/index.ts"
-# Specifies static files to be bundled with the function. Supports glob patterns.
-# For example, if you want to serve static HTML pages in your function:
-# static_files = [ "./functions/wrappedgapi/*.html" ]

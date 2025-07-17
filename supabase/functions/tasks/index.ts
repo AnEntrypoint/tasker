@@ -1,99 +1,128 @@
-// import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts"; // Removed dotenv
+import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve, ConnInfo } from "https://deno.land/std@0.201.0/http/server.ts";
 import { corsHeaders } from "../quickjs/cors.ts";
-// executeTask is not directly used by tasks/index.ts anymore for the main /tasks endpoint,
-// as it now manages stack_runs and task_runs itself.
-// import { executeTask } from "./handlers/task-executor.ts"; 
+import { executeTask } from "./handlers/task-executor.ts";
 import { jsonResponse, formatTaskResult, formatLogMessage } from "./utils/response-formatter.ts";
 import { TaskRegistry } from "./registry/task-registry.ts";
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
-// import { generateSchema, formatSchema } from './services/schema-generator.ts'; // Not used in this file
-// import { parseJSDocComments } from './utils/jsdoc-parser.ts'; // Not used in this file
-// import { GeneratedSchema } from "./types/index.ts"; // Not used in this file
-// import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server"; // Not used in this file
-import { hostLog, simpleStringify } from '../_shared/utils.ts';
-import { fetchTaskFromDatabase, supabaseClient as dbClient } from "./services/database.ts"; // Use the client from database.ts
+import { generateSchema, formatSchema } from './services/schema-generator.ts';
+import { parseJSDocComments } from './utils/jsdoc-parser.ts';
+import { GeneratedSchema } from "./types/index.ts";
+import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
+import { hostLog, simpleStringify } from '../_shared/utils.ts'; // Assuming utils are in _shared
+import { fetchTaskFromDatabase } from "./services/database.ts";
 
-// config({ export: true }); // Removed dotenv call
+config({ export: true });
 
 declare global {
   var __updatedFields: Record<string, any>;
 }
 
 // Initialize task registries
-// const basicTaskRegistry = new TaskRegistry(); // Not used in this file's current logic
-// const specialTaskRegistry = new TaskRegistry(); // Not used in this file's current logic
+const basicTaskRegistry = new TaskRegistry();
+const specialTaskRegistry = new TaskRegistry();
 
-// --- Environment Setup ---
-// Prioritize EXT_ prefixed variables from Supabase Edge Runtime for external URLs
-const EXT_SUPABASE_URL = Deno.env.get('EXT_SUPABASE_URL') || 'http://127.0.0.1:8000'; // Default to local functions server
+// Environment setup
+const extSupabaseUrl = Deno.env.get('EXT_SUPABASE_URL') || '';
+const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
 
-// For internal Supabase client connections (e.g., to REST API)
-// Use the same URL as EXT_SUPABASE_URL for local development since they point to the same Supabase instance
-let INTERNAL_SUPABASE_REST_URL = Deno.env.get('SUPABASE_URL') || EXT_SUPABASE_URL;
+// If the URL is the edge functions URL, use the REST API URL instead for local dev
+const SUPABASE_URL = extSupabaseUrl.includes('127.0.0.1:8000') 
+    ? 'http://localhost:54321' 
+    : extSupabaseUrl || (supabaseUrl.includes('127.0.0.1:8000') ? 'http://localhost:54321' : supabaseUrl);
 
-// Remove the faulty logic that sets to localhost:54321 (that's the Studio URL, not REST API)
-console.warn(`[tasks/index.ts] INTERNAL_SUPABASE_REST_URL set to: ${INTERNAL_SUPABASE_REST_URL}`);
-
-const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-// ANON_KEY is not directly used for server-side operations in this file. fetchTaskFromDatabase handles its own key requirements.
-
-if (!SERVICE_ROLE_KEY) {
-    console.error("[tasks/index.ts] CRITICAL: Service role key (EXT_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY) is not configured.");
-    // Depending on deployment, may want to throw here or let individual handlers fail.
-}
-
-console.log(`[tasks/index.ts] EXT_SUPABASE_URL: ${EXT_SUPABASE_URL}`);
-console.log(`[tasks/index.ts] INTERNAL_SUPABASE_REST_URL: ${INTERNAL_SUPABASE_REST_URL}`);
-console.log(`[tasks/index.ts] SERVICE_ROLE_KEY (masked): ${SERVICE_ROLE_KEY ? '*'.repeat(10) : 'MISSING'}`);
-// console.log(`[INFO] Environment variables:`, Deno.env.toObject()); // Too verbose for regular logs
-
-// Supabase client for administrative tasks within this edge function
-// Uses INTERNAL_SUPABASE_REST_URL to connect directly to the DB services.
-const adminSupabaseClient: SupabaseClient = createClient(INTERNAL_SUPABASE_REST_URL, SERVICE_ROLE_KEY!, {
+const SUPABASE_ANON_KEY = Deno.env.get('EXT_SUPABASE_ANON_KEY') || Deno.env.get('SUPABASE_ANON_KEY') || '';
+const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+console.log(`[INFO] SUPABASE_URL: ${SUPABASE_URL}`);
+console.log(`[INFO] SERVICE_ROLE_KEY (masked): ${SERVICE_ROLE_KEY ? '*'.repeat(10) : 'MISSING'}`);
+console.log(`[INFO] Environment variables:`, Deno.env.toObject());
+const supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { persistSession: false }
 });
 
-
 // --- Define the Tasks Service for SDK Wrapper ---
-// This tasksService is meant to be callable via the QuickJS VM tools.execute('tasks.execute', ...)
-// It should not rely on the complex direct fetch logic in tasksHandler, but rather use a simpler execution path.
-// The original tasksService implementation was complex. Let's simplify.
-// For now, this is a placeholder as the primary execution flow is through HTTP requests to /tasks/execute.
-// If tools.execute('tasks.execute', ...) is a critical path, it needs robust implementation.
-// Given the current setup where /tasks/execute offloads to stack_runs, tools.execute might also need to create a stack_run.
-
-// const tasksService = { ... } // Placeholder: Original complex tasksService removed for clarity. 
-//                            // If this is still needed for tools.execute in QJS, it needs careful reimplementation
-//                            // to align with the ephemeral stack_run model.
+const tasksService = {
+  execute: async (taskIdentifier: string, input: Record<string, unknown> = {}, options: { debug?: boolean, verbose?: boolean, include_logs?: boolean } = {}) => {
+    //console.log(`[INFO][SDK Service] Received task execution request for: ${taskIdentifier}`);
+    const logs: string[] = [formatLogMessage('INFO', `[SDK Service] Executing task: ${taskIdentifier}`)];
+    try {
+      // Check registry first (same logic as direct execution)
+      if (specialTaskRegistry.hasTask(taskIdentifier) || basicTaskRegistry.hasTask(taskIdentifier)) {
+        logs.push(formatLogMessage('INFO', `[SDK Service] Executing registered task: ${taskIdentifier}`));
+        let result;
+        if (specialTaskRegistry.hasTask(taskIdentifier)) {
+          result = await specialTaskRegistry.executeTask(taskIdentifier, input, logs);
+        } else {
+          result = await basicTaskRegistry.executeTask(taskIdentifier, input, logs);
+        }
+        // The SDK wrapper expects the raw result, not a formatted Response
+        return { success: true, data: result, logs };
+      } else {
+        // Execute from database via executeTask
+        logs.push(formatLogMessage('INFO', `[SDK Service] Executing task from database: ${taskIdentifier}`));
+        const response = await executeTask(taskIdentifier, input, options);
+        const result = await response.json(); // executeTask returns a Response
+        // Extract data and logs from the formatted response
+        return { success: result.success, data: result.result, error: result.error, logs: result.logs };
+      }
+    } catch (error) {
+      const errorMsg = `[SDK Service] Error executing task ${taskIdentifier}: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[ERROR] ${errorMsg}`);
+      logs.push(formatLogMessage('ERROR', errorMsg));
+      // Throw the error so executeMethodChain can format it
+      throw new Error(errorMsg);
+    }
+  }
+};
+// ---------------------------------------------
 
 // Initialize global state
 if (!globalThis.__updatedFields) globalThis.__updatedFields = {};
 
-// function createResponse(data: any, logs: string[] = [], status = 200): Response { // Not used
-//   return jsonResponse(formatTaskResult(true, data, undefined, logs), status);
-// }
+function createResponse(data: any, logs: string[] = [], status = 200): Response {
+  return jsonResponse(formatTaskResult(true, data, undefined, logs), status);
+}
 
-// function createErrorResponse(errorMessage: string, logs: string[] = [], status = 500): Response { // Not used
-//   return jsonResponse(formatTaskResult(false, undefined, errorMessage, logs), status);
-// }
+function createErrorResponse(errorMessage: string, logs: string[] = [], status = 500): Response {
+  return jsonResponse(formatTaskResult(false, undefined, errorMessage, logs), status);
+}
 
-// function createCorsPreflightResponse(): Response { // Not used directly, handled in main serve
-//   return new Response(null, { status: 204, headers: corsHeaders });
-// }
+function createCorsPreflightResponse(): Response {
+  return new Response(null, { status: 204, headers: corsHeaders });
+}
 
 const CORS_HEADERS = {
-    'Access-Control-Allow-Origin': '*', // Adjust for production
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, prefer', // Added prefer
-    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PATCH', // Added GET, PATCH
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const LOG_PREFIX_BASE = "[TasksEF]"; // Tasks Edge Function
+const LOG_PREFIX_BASE = "[TasksHandlerEF]"; // Tasks Handler Edge Function
 
 async function tasksHandler(req: Request): Promise<Response> {
+    // Handle CORS preflight requests
     if (req.method === "OPTIONS") {
         return new Response("ok", { headers: CORS_HEADERS });
+    }
+
+    let supabaseClient: SupabaseClient;
+    try {
+        if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+            hostLog(LOG_PREFIX_BASE, 'error', "Supabase URL or Service Role Key is not configured in environment variables.");
+            throw new Error("Supabase environment variables for service role not set.");
+        }
+        // Initialize Supabase client with service role key for administrative tasks
+        supabaseClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
+            // No need to pass auth headers explicitly when using service_role_key server-side
+            auth: { persistSession: false }
+        });
+    } catch (e: unknown) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        hostLog(LOG_PREFIX_BASE, 'error', "Supabase client (service role) initialization failed:", error.message);
+        return new Response(simpleStringify({ error: "Server configuration error.", details: error.message }), {
+            status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
     }
 
     let requestBody;
@@ -108,406 +137,605 @@ async function tasksHandler(req: Request): Promise<Response> {
     }
 
     const { taskName, input } = requestBody;
-    const logPrefix = `${LOG_PREFIX_BASE} [Task: ${taskName || 'N/A'}]`;
+    const logPrefix = `${LOG_PREFIX_BASE} [TaskName: ${taskName || 'N/A'}]`;
 
     if (!taskName || typeof taskName !== 'string') {
-        hostLog(logPrefix, 'error', "'taskName' is required and must be a string.");
+        hostLog(logPrefix, 'error', "'taskName' is required in the request body and must be a string.");
         return new Response(simpleStringify({ error: "'taskName' is required and must be a string." }), {
             status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
     }
 
     try {
+        // Step 1: Fetch Task Definition from task_functions table
         hostLog(logPrefix, 'info', `Attempting to fetch definition for task: '${taskName}'`);
-        const taskFunction = await fetchTaskFromDatabase(undefined, taskName); // Uses dbClient with service_role from database.ts
+        
+        // Use fetchTaskFromDatabase which now has direct HTTP fetch as a fallback
+        const taskFunction = await fetchTaskFromDatabase(undefined, taskName);
 
-        if (!taskFunction || !taskFunction.id || !taskFunction.code) {
-            hostLog(logPrefix, 'warn', `Task definition not found or incomplete for '${taskName}'.`);
-            return new Response(simpleStringify({ error: `Task '${taskName}' not found or is invalid.` }), {
+        if (!taskFunction) {
+            hostLog(logPrefix, 'warn', `Task definition not found for '${taskName}'.`);
+            return new Response(simpleStringify({ error: `Task '${taskName}' not found.` }), {
                 status: 404, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
             });
         }
         hostLog(logPrefix, 'info', `Task definition '${taskFunction.name}' (ID: ${taskFunction.id}) found.`);
 
-        hostLog(logPrefix, 'info', `Creating task_run record for input:`, input || '(no input)');
-        const { data: taskRunData, error: taskRunError } = await adminSupabaseClient
-            .from('task_runs')
-            .insert({
+        // Step 2: Create a task_runs record to track the overall user request
+        hostLog(logPrefix, 'info', `Creating task_run record with input:`, input || '(no input)');
+        
+        // Use direct fetch method for creating task_run record
+        const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+        const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+                         
+        if (!serviceRoleKey) {
+            throw new Error("Service role key not available for direct insert");
+        }
+        
+        const taskRunData = {
             task_function_id: taskFunction.id,
             task_name: taskFunction.name,
             input: input || null,
             status: 'queued'
-            })
-            .select('id')
-            .single();
-
-        if (taskRunError || !taskRunData) {
-            hostLog(logPrefix, 'error', `Failed to create task_run record:`, taskRunError?.message || "No data returned");
-            throw new Error(`Database error: Failed to initiate task run. ${taskRunError?.message}`);
+        };
+        
+        const url = `${baseUrl}/rest/v1/task_runs`;
+        
+        const insertResponse = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(taskRunData)
+        });
+        
+        if (!insertResponse.ok) {
+            const errorText = await insertResponse.text();
+            hostLog(logPrefix, 'error', `Failed to create task_run record in database: HTTP ${insertResponse.status} ${insertResponse.statusText}`, errorText);
+            throw new Error(`Database error: Failed to initiate task run. HTTP ${insertResponse.status} ${insertResponse.statusText}`);
         }
-        const taskRunId = taskRunData.id;
-        hostLog(logPrefix, 'info', `Task_run record created: ${taskRunId}`);
+        
+        const taskRunResult = await insertResponse.json();
+        const taskRunId = Array.isArray(taskRunResult) && taskRunResult.length > 0 ? taskRunResult[0].id : null;
+        
+        if (!taskRunId) {
+            hostLog(logPrefix, 'error', "Failed to obtain task_run ID after insertion");
+            throw new Error("Database error: Failed to obtain task run ID after insertion");
+        }
+        
+        hostLog(logPrefix, 'info', `Task_run record created successfully: ${taskRunId}`);
 
+        // Step 3: Create the initial stack_runs record to kick off the execution
         hostLog(logPrefix, 'info', `Creating initial stack_run for task_run ${taskRunId}`);
-        const { data: stackRunDataInsert, error: stackRunError } = await adminSupabaseClient
-            .from('stack_runs')
-            .insert({
+        
+        // Use direct fetch for creating stack_run record
+        const stackRunData = {
             parent_task_run_id: taskRunId,
-                service_name: 'tasks', // Or taskFunction.name if more specific
-                method_name: 'execute', // Standard method for initial task execution
-                args: [taskFunction.name, input || {}], // Ensure args are serializable
+            service_name: 'tasks',
+            method_name: 'execute',
+            args: [taskFunction.name, input || null],
             status: 'pending',
-                vm_state: { // Initial state for QuickJS
-                    taskCode: taskFunction.code,
-                    taskName: taskFunction.name,
-                    taskInput: input || {},
-                    // taskRunId: taskRunId, // Pass taskRunId to QJS for linking logs/state
-                }
-            })
-            .select('id')
-            .single();
-
-        if (stackRunError || !stackRunDataInsert) {
-            hostLog(logPrefix, 'error', `Failed to create initial stack_run record:`, stackRunError?.message || "No data returned");
-            // Attempt to mark the parent task_run as failed
+            vm_state: {
+                taskCode: taskFunction.code,
+                taskName: taskFunction.name,
+                taskInput: input || null
+            }
+        };
+        
+        const stackRunsUrl = `${baseUrl}/rest/v1/stack_runs`;
+        
+        const stackRunResponse = await fetch(stackRunsUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(stackRunData)
+        });
+        
+        if (!stackRunResponse.ok) {
+            const errorText = await stackRunResponse.text();
+            hostLog(logPrefix, 'error', `Failed to create initial stack_run record in database: HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`, errorText);
+            
+            // Attempt to mark the parent task_run as failed to avoid orphaned task_runs
             try {
-                await adminSupabaseClient
-                    .from('task_runs')
-                    .update({
+                const updateTaskRunUrl = `${baseUrl}/rest/v1/task_runs?id=eq.${encodeURIComponent(taskRunId)}`;
+                await fetch(updateTaskRunUrl, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    },
+                    body: JSON.stringify({
                         status: 'failed',
                         error: { 
                             message: "System error: Failed to create initial stack_run for task execution.", 
-                            details: stackRunError?.message || "Unknown stack_run insertion error"
+                            details: `HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`
                         },
                         ended_at: new Date().toISOString()
                     })
-                    .eq('id', taskRunId);
+                });
             } catch (updateErr) {
                 hostLog(logPrefix, 'error', "Additionally failed to mark task_run as failed:", updateErr);
             }
-            throw new Error(`Database error: Failed to create initial stack run. ${stackRunError?.message}`);
+            
+            throw new Error(`Database error: Failed to create initial stack run. HTTP ${stackRunResponse.status} ${stackRunResponse.statusText}`);
         }
-        const initialStackRunId = stackRunDataInsert.id;
-        hostLog(logPrefix, 'info', `Initial stack_run ${initialStackRunId} created for task '${taskName}' (task_run ID: ${taskRunId}). Offloading for processing.`);
         
-        // Asynchronously trigger stack processor (best effort, cron is fallback)
-        const isLocalDev = EXT_SUPABASE_URL.includes('127.0.0.1') || EXT_SUPABASE_URL.includes('localhost');
+        const stackRunResult = await stackRunResponse.json();
+        const stackRunId = Array.isArray(stackRunResult) && stackRunResult.length > 0 ? stackRunResult[0].id : null;
         
-        if (isLocalDev) {
-            // For local development, use the same pattern as the stack processor does internally
-            // Queue a direct call without HTTP to avoid networking issues
-            setTimeout(async () => {
-                hostLog(logPrefix, 'info', `Local dev: Processing stack_run ${initialStackRunId} directly`);
-                try {
-                    // For local development, use kong URL for edge-to-edge communication
-                    const stackProcessorUrl = EXT_SUPABASE_URL.includes('127.0.0.1') || EXT_SUPABASE_URL.includes('localhost') 
-                        ? 'http://kong:8000/functions/v1/stack-processor'
-                        : `${EXT_SUPABASE_URL}/functions/v1/stack-processor`;
-                    
-                    hostLog(logPrefix, 'info', `Local dev: Using stack processor URL: ${stackProcessorUrl}`);
-                    const response = await fetch(stackProcessorUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({})
-                    });
-                    
-                    if (response.ok) {
-                        const result = await response.text();
-                        hostLog(logPrefix, 'info', `Local dev: Stack processor triggered: ${result}`);
-                    } else {
-                        hostLog(logPrefix, 'warn', `Local dev: Stack processor failed with status ${response.status}`);
-                    }
-                } catch (error) {
-                    hostLog(logPrefix, 'error', `Local dev: Stack processor error: ${error instanceof Error ? error.message : String(error)}`);
-                    hostLog(logPrefix, 'info', `Local dev: Stack run ${initialStackRunId} will be processed by next stack processor poll`);
-                }
-            }, 100); // Short delay just to let current request complete
-        } else {
-            // Production: use regular HTTP trigger with auth
-            const stackProcessorUrl = `${EXT_SUPABASE_URL}/functions/v1/stack-processor`;
-            fetch(stackProcessorUrl, {
+        if (!stackRunId) {
+            hostLog(logPrefix, 'error', "Failed to obtain stack_run ID after insertion");
+            throw new Error("Database error: Failed to obtain stack run ID after insertion");
+        }
+        
+        hostLog(logPrefix, 'info', `Initial stack_run ${stackRunId} created. Task '${taskName}' (run ID: ${taskRunId}) has been successfully offloaded.`);
+
+        // Step 4: Immediately trigger stack processor to avoid relying on database triggers
+        try {
+            hostLog(logPrefix, 'info', `Directly triggering stack processor for task run ${taskRunId}`);
+            const stackProcessorUrl = `${baseUrl}/functions/v1/stack-processor`;
+            
+            const processorResponse = await fetch(stackProcessorUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+                    'Authorization': `Bearer ${serviceRoleKey}`
                 },
-                body: JSON.stringify({ stackRunId: initialStackRunId })
-            }).then(async (res) => {
-                if (!res.ok) {
-                    hostLog(logPrefix, 'warn', `Stack processor trigger failed: ${res.status}`, await res.text());
-                } else {
-                    hostLog(logPrefix, 'info', `Stack processor triggered for stack_run ${initialStackRunId}.`);
-                }
-            }).catch(e => {
-                hostLog(logPrefix, 'warn', `Error triggering stack processor:`, e.message);
+                body: JSON.stringify({
+                    stackRunId: stackRunId
+                })
             });
+            
+            if (!processorResponse.ok) {
+                const errorText = await processorResponse.text();
+                hostLog(logPrefix, 'warn', `Failed to trigger stack processor (will continue asynchronously): HTTP ${processorResponse.status}`, errorText);
+                // Continue even if direct processing fails (it will be picked up by cron)
+            } else {
+                hostLog(logPrefix, 'info', `Stack processor triggered successfully for task run ${taskRunId}`);
+            }
+        } catch (e) {
+            const error = e instanceof Error ? e : new Error(String(e));
+            hostLog(logPrefix, 'warn', `Error triggering stack processor (will continue asynchronously):`, error.message);
+            // Continue even if direct processing fails (it will be picked up by cron)
         }
 
+        // Step 5: Respond to the user indicating the task has been accepted
         return new Response(simpleStringify({
             message: "Task accepted and queued for asynchronous processing.",
-            taskRunId: taskRunId,
-            initialStackRunId: initialStackRunId // Optionally return this for more direct tracking
+            taskRunId: taskRunId
         }), {
-            status: 202, // HTTP 202 Accepted
+            status: 202, // HTTP 202 Accepted: Request accepted, processing not complete
             headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
 
     } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
         hostLog(logPrefix, 'error', "Unhandled error in /tasks endpoint handler:", error.message, error.stack);
-        return new Response(simpleStringify({ error: "An unexpected server error occurred." }), {
+        // Avoid exposing detailed internal errors to the client unless necessary
+        return new Response(simpleStringify({ error: "An unexpected server error occurred while processing the task request." }), {
             status: 500,
             headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
     }
 }
 
+// New handler for getting task status
 async function statusHandler(req: Request): Promise<Response> {
-    if (req.method === "OPTIONS") { // Handle OPTIONS for GET requests too
-        return new Response("ok", { headers: CORS_HEADERS });
-    }
+    // Extract taskRunId from query params in URL for GET requests
     const url = new URL(req.url);
     const taskRunId = url.searchParams.get('id');
-    const logPrefix = `${LOG_PREFIX_BASE} [Status/${taskRunId || 'N/A'}]`;
+    
+    const logPrefix = `[tasks/status/${taskRunId}]`;
+    
+    hostLog(logPrefix, 'info', `Received status request for task run ID: ${taskRunId}`);
     
     if (!taskRunId) {
-        return new Response(simpleStringify({ error: 'Missing taskRunId query parameter' }), {
-            status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-        });
+        return new Response(
+            simpleStringify({ error: 'Missing taskRunId parameter' }),
+            { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     }
     
     try {
-        hostLog(logPrefix, 'info', `Fetching status for task run ID: ${taskRunId}`);
-        const { data: taskRun, error } = await adminSupabaseClient
-            .from('task_runs')
-            .select('*')
-            .eq('id', taskRunId)
-            .single();
-
-        if (error) {
-            hostLog(logPrefix, 'error', `Database query failed for task_run: ${error.message}`);
-            if (error.code === 'PGRST116') { // Not found
-                 return new Response(simpleStringify({ error: `Task run with ID ${taskRunId} not found` }), {
-                    status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-                });
+        // Determine the correct baseUrl for database access
+        const extSupabaseUrl = Deno.env.get("EXT_SUPABASE_URL") || "";
+        const supabaseUrl = Deno.env.get("SUPABASE_URL") || "http://kong:8000";
+        
+        // Use Kong URL for local development or when EXT_SUPABASE_URL is missing
+        const useKong = extSupabaseUrl.includes('localhost') || 
+                       extSupabaseUrl.includes('127.0.0.1') || 
+                       !extSupabaseUrl;
+                       
+        const baseUrl = useKong 
+            ? 'http://kong:8000/rest/v1' 
+            : `${SUPABASE_URL}/rest/v1`;
+        
+        // Fetch task run from database
+        const dbUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}&select=*`;
+        hostLog(logPrefix, 'info', `Attempting to fetch task run from: ${dbUrl}`);
+        
+        const response = await fetch(dbUrl, {
+            headers: {
+                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                'apikey': SERVICE_ROLE_KEY
             }
-            return new Response(simpleStringify({ error: `Failed to fetch task status: ${error.message}` }), {
-                status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-            });
-        }
-
-        if (!taskRun) { // Should be covered by PGRST116, but as a safeguard
-            return new Response(simpleStringify({ error: `Task run with ID ${taskRunId} not found` }), {
-                status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-            });
+        });
+        
+        if (!response.ok) {
+            const error = await response.text();
+            const errorMessage = `Database query failed: ${error}`;
+            hostLog(logPrefix, 'error', errorMessage);
+            return new Response(
+                simpleStringify({ error: `Failed to fetch task status: ${errorMessage}` }),
+                { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
         }
         
-        // Check for stuck tasks or attempt to update status from a completed stack_run
-        // This logic can be complex; for now, we primarily return the current state.
-        // A more robust solution might involve a separate "status updater" or refined logic in stack-processor.
+        const tasks = await response.json();
+        hostLog(logPrefix, 'info', `Database query successful. Found ${tasks.length} records.`);
+        
+        if (tasks.length === 0) {
+            return new Response(
+                simpleStringify({ error: `Task run with ID ${taskRunId} not found` }),
+                { status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const taskRun = tasks[0];
+        
+        // Check if task has been stuck in 'queued' or 'processing' state
         if ((taskRun.status === 'queued' || taskRun.status === 'processing') && taskRun.created_at) {
             const createdAt = new Date(taskRun.created_at);
             const now = new Date();
             const diffInSeconds = Math.floor((now.getTime() - createdAt.getTime()) / 1000);
             
-            // If task seems stuck, we might try to find its latest stack_run
-            if (diffInSeconds > 30) { // Example: 30 seconds
-                 hostLog(logPrefix, 'info', `Task status is '${taskRun.status}' for ${diffInSeconds}s. Checking for completed stack runs.`);
-                const { data: completedStackRun, error: stackRunError } = await adminSupabaseClient
-                    .from('stack_runs')
-                    .select('result, status, error')
-                    .eq('parent_task_run_id', taskRunId)
-                    .order('created_at', { ascending: false })
-                    .limit(1)
-                    .maybeSingle(); // Use maybeSingle to handle no rows gracefully
-
-                if (stackRunError) {
-                    hostLog(logPrefix, 'warn', `Could not query latest stack_run for task_run ${taskRunId}: ${stackRunError.message}`);
-                } else if (completedStackRun) {
-                    if (completedStackRun.status === 'completed' && taskRun.status !== 'completed') {
-                        hostLog(logPrefix, 'info', `Found terminal stack_run in 'completed' state. Updating task_run ${taskRunId}.`);
-                        const { error: updateError } = await adminSupabaseClient
-                            .from('task_runs')
-                            .update({ 
+            // Even for recent tasks, do a quick check for completed results
+            hostLog(logPrefix, 'info', `Task is in ${taskRun.status} state for ${diffInSeconds} seconds, checking if there's a completed stack run`);
+            
+            // First try: Get the stack run associated with this task
+            try {
+                // Use parent_task_run_id field
+                const stackRunUrl = `${baseUrl}/stack_runs?select=*&parent_task_run_id=eq.${taskRunId}&status=eq.completed&order=created_at.desc&limit=1`;
+                const stackRunResponse = await fetch(stackRunUrl, {
+                    headers: {
+                        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (stackRunResponse.ok) {
+                    const stackRuns = await stackRunResponse.json();
+                    
+                    if (stackRuns && stackRuns.length > 0) {
+                        const completedStackRun = stackRuns[0];
+                        hostLog(logPrefix, 'warn', `Found completed stack run ${completedStackRun.id} with result, updating task run status`);
+                        
+                        // Update the task run to completed with the result from the stack run
+                        const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                        const updateResponse = await fetch(updateUrl, {
+                            method: 'PATCH',
+                            headers: {
+                                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                'apikey': SERVICE_ROLE_KEY,
+                                'Content-Type': 'application/json',
+                                'Prefer': 'return=minimal'
+                            },
+                            body: JSON.stringify({
                                 status: 'completed',
                                 result: completedStackRun.result,
-                                ended_at: new Date().toISOString(),
                                 updated_at: new Date().toISOString(),
-                             })
-                            .eq('id', taskRunId);
-                        if (updateError) {
-                             hostLog(logPrefix, 'error', `Failed to update task_run ${taskRunId} from stack_run: ${updateError.message}`);
-                        } else {
-                            taskRun.status = 'completed'; // Reflect change in current response
-                            taskRun.result = completedStackRun.result;
-                        }
-                    } else if (completedStackRun.status === 'failed' && taskRun.status !== 'failed' && taskRun.status !== 'error') {
-                         hostLog(logPrefix, 'info', `Found terminal stack_run in 'failed' state. Updating task_run ${taskRunId}.`);
-                        const { error: updateError } = await adminSupabaseClient
-                            .from('task_runs')
-                            .update({ 
-                                status: 'error', // or 'failed' depending on desired task_run state
-                                error: completedStackRun.error || { message: 'Derived from failed stack_run' },
-                                ended_at: new Date().toISOString(),
-                                            updated_at: new Date().toISOString(),
+                                ended_at: new Date().toISOString()
                             })
-                            .eq('id', taskRunId);
-                        if (updateError) {
-                             hostLog(logPrefix, 'error', `Failed to update task_run ${taskRunId} from failed stack_run: ${updateError.message}`);
+                        });
+                        
+                        if (!updateResponse.ok) {
+                            const updateError = await updateResponse.text();
+                            hostLog(logPrefix, 'error', `Failed to update task run status: ${updateError}`);
+                        } else {
+                            hostLog(logPrefix, 'info', `Successfully updated task run ${taskRunId} to completed status`);
+                            
+                            // Update the taskRun object with the new status and result
+                            taskRun.status = 'completed';
+                            taskRun.result = completedStackRun.result;
+                            taskRun.updated_at = new Date().toISOString();
+                            taskRun.ended_at = new Date().toISOString();
+                        }
+                    } else {
+                        // Try a different query using parent_task_run_id field (handles legacy/compatibility)
+                        try {
+                            const altStackRunUrl = `${baseUrl}/stack_runs?select=*&parent_task_run_id=eq.${taskRunId}&status=eq.completed&order=created_at.desc&limit=1`;
+                            const altStackRunResponse = await fetch(altStackRunUrl, {
+                                headers: {
+                                    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                    'apikey': SERVICE_ROLE_KEY
+                                }
+                            });
+                            
+                            if (altStackRunResponse.ok) {
+                                const altStackRuns = await altStackRunResponse.json();
+                                
+                                if (altStackRuns && altStackRuns.length > 0) {
+                                    const completedStackRun = altStackRuns[0];
+                                    hostLog(logPrefix, 'warn', `Found completed stack run ${completedStackRun.id} with result (via parent_task_run_id), updating task run status`);
+                                    
+                                    // Update the task run to completed with the result from the stack run
+                                    const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                                    const updateResponse = await fetch(updateUrl, {
+                                        method: 'PATCH',
+                                        headers: {
+                                            'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                            'apikey': SERVICE_ROLE_KEY,
+                                            'Content-Type': 'application/json',
+                                            'Prefer': 'return=minimal'
+                                        },
+                                        body: JSON.stringify({
+                                            status: 'completed',
+                                            result: completedStackRun.result,
+                                            updated_at: new Date().toISOString(),
+                                            ended_at: new Date().toISOString()
+                                        })
+                                    });
+                                    
+                                    if (updateResponse.ok) {
+                                        hostLog(logPrefix, 'info', `Successfully updated task run ${taskRunId} to completed status (via parent_task_run_id)`);
+                                        
+                                        // Update the taskRun object
+                                        taskRun.status = 'completed';
+                                        taskRun.result = completedStackRun.result;
+                                        taskRun.updated_at = new Date().toISOString();
+                                        taskRun.ended_at = new Date().toISOString();
+                                    }
                                 } else {
-                            taskRun.status = 'error'; // Reflect change
-                            taskRun.error = completedStackRun.error || { message: 'Derived from failed stack_run' };
+                                    hostLog(logPrefix, 'info', `No completed stack run found for task run ${taskRunId} with either query method`);
+                                    
+                                    // For long-running tasks, check if we need a manual cleanup
+                                    if (diffInSeconds > 60) {
+                                        hostLog(logPrefix, 'warn', `Task has been stuck in ${taskRun.status} state for over 60 seconds, performing manual check`);
+                                        
+                                        // Fallback: Try to find any stack run related to this task
+                                        try {
+                                            if (taskRun.waiting_on_stack_run_id) {
+                                                // If we have a waiting_on_stack_run_id, just wait for that to complete
+                                                hostLog(logPrefix, 'info', `Task is waiting on stack run ${taskRun.waiting_on_stack_run_id}, no manual intervention needed`);
+                                                // Continue with normal status return
+                                            }
+                                            
+                                            const allStackRunsUrl = `${baseUrl}/stack_runs?select=*&or=(parent_task_run_id.eq.${taskRunId})&order=created_at.desc&limit=1`;
+                                            
+                                            hostLog(logPrefix, 'info', `Checking for any stack runs: ${allStackRunsUrl}`);
+                                            
+                                            const allStackRunsResponse = await fetch(allStackRunsUrl, {
+                                                headers: {
+                                                    'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                                    'Content-Type': 'application/json'
+                                                }
+                                            });
+                                            
+                                            if (allStackRunsResponse.ok) {
+                                                const allStackRuns = await allStackRunsResponse.json();
+                                                
+                                                if (allStackRuns && allStackRuns.length > 0) {
+                                                    const latestStackRun = allStackRuns[0];
+                                                    hostLog(logPrefix, 'warn', `Found stack run ${latestStackRun.id} with status ${latestStackRun.status}, but no completed result`);
+                                                    
+                                                    // If task has been running too long, mark as error
+                                                    if (diffInSeconds > 120) {
+                                                        const updateUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}`;
+                                                        await fetch(updateUrl, {
+                                                            method: 'PATCH',
+                                                            headers: {
+                                                                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                                                                'apikey': SERVICE_ROLE_KEY,
+                                                                'Content-Type': 'application/json',
+                                                                'Prefer': 'return=minimal'
+                                                            },
+                                                            body: JSON.stringify({
+                                                                status: 'error',
+                                                                error: { message: 'Task execution timed out after 120 seconds' },
+                                                                updated_at: new Date().toISOString(),
+                                                                ended_at: new Date().toISOString()
+                                                            })
+                                                        });
+                                                        
+                                                        taskRun.status = 'error';
+                                                        taskRun.error = { message: 'Task execution timed out after 120 seconds' };
+                                                        taskRun.updated_at = new Date().toISOString();
+                                                        taskRun.ended_at = new Date().toISOString();
+                                                    }
+                                                }
+                                            }
+                                        } catch (e) {
+                                            hostLog(logPrefix, 'error', `Error checking for completed stack runs: ${e instanceof Error ? e.message : String(e)}`);
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (altError) {
+                            hostLog(logPrefix, 'error', `Error checking alternative stack runs query: ${altError instanceof Error ? altError.message : String(altError)}`);
                         }
                     }
+                } else {
+                    const stackRunError = await stackRunResponse.text();
+                    hostLog(logPrefix, 'error', `Failed to check for completed stack runs: ${stackRunError}`);
                 }
+            } catch (e) {
+                hostLog(logPrefix, 'error', `Error checking for completed stack runs: ${e instanceof Error ? e.message : String(e)}`);
             }
         }
-
-
-        hostLog(logPrefix, 'info', `Returning task_run status: ${taskRun.status}`);
-        if (taskRun.status === 'error' || taskRun.status === 'failed') {
-            hostLog(logPrefix, 'warn', `Task in error/failed state. Details: ${simpleStringify(taskRun.error || 'No error details')}`);
+        
+        hostLog(logPrefix, 'info', `Returning task run with status: ${taskRun.status}`);
+        
+        // Extra handling for error states to make debugging easier
+        if (taskRun.status === 'error') {
+            hostLog(logPrefix, 'warn', `Task in error state. Error details: ${JSON.stringify(taskRun.error || 'No error details available')}`);
         }
-
-        return new Response(simpleStringify(taskRun), {
-            status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-        });
+        
+        return new Response(
+            simpleStringify(taskRun),
+            { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         hostLog(logPrefix, 'error', `Exception in statusHandler: ${errorMessage}`);
-        return new Response(simpleStringify({ error: `Internal server error: ${errorMessage}` }), {
-            status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-        });
+        return new Response(
+            simpleStringify({ error: `Internal server error: ${errorMessage}` }),
+            { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     }
 }
 
+// Helper function to handle task logs requests
 async function logsHandler(req: Request): Promise<Response> {
-    if (req.method === "OPTIONS") { // Handle OPTIONS for GET requests too
-        return new Response("ok", { headers: CORS_HEADERS });
-    }
+    // Extract taskRunId from query params in URL for GET requests
     const url = new URL(req.url);
     const taskRunId = url.searchParams.get('id');
-    const logPrefix = `${LOG_PREFIX_BASE} [Logs/${taskRunId || 'N/A'}]`;
+    
+    const logPrefix = `[tasks/logs/${taskRunId}]`;
+    
+    hostLog(logPrefix, 'info', `Received logs request for task run ID: ${taskRunId}`);
     
     if (!taskRunId) {
-        return new Response(simpleStringify({ error: 'Missing taskRunId query parameter' }), {
-            status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-        });
+        return new Response(
+            simpleStringify({ error: 'Missing taskRunId parameter' }),
+            { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     }
     
     try {
-        hostLog(logPrefix, 'info', `Fetching logs for task run ID: ${taskRunId}`);
-        // Fetch logs from task_runs and potentially related stack_runs if detailed logging is stored there
-        const { data: taskRun, error } = await adminSupabaseClient
-            .from('task_runs')
-            .select('logs, vm_logs, status, error') // Select relevant fields
-            .eq('id', taskRunId)
-            .single();
-
-        if (error) {
-            hostLog(logPrefix, 'error', `Database query failed for task_run logs: ${error.message}`);
-             if (error.code === 'PGRST116') { // Not found
-                 return new Response(simpleStringify({ error: `Task run with ID ${taskRunId} not found (for logs)` }), {
-                    status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-                });
+        // Determine the correct baseUrl for database access
+        const extSupabaseUrl = Deno.env.get("EXT_SUPABASE_URL") || "";
+        const supabaseUrl = Deno.env.get("SUPABASE_URL") || "http://kong:8000";
+        
+        // Use Kong URL for local development or when EXT_SUPABASE_URL is missing
+        const useKong = extSupabaseUrl.includes('localhost') || 
+                       extSupabaseUrl.includes('127.0.0.1') || 
+                       !extSupabaseUrl;
+                       
+        const baseUrl = useKong 
+            ? 'http://kong:8000/rest/v1' 
+            : `${SUPABASE_URL}/rest/v1`;
+        
+        // Fetch task run from database
+        const dbUrl = `${baseUrl}/task_runs?id=eq.${taskRunId}&select=*`;
+        hostLog(logPrefix, 'info', `Attempting to fetch task run from: ${dbUrl}`);
+        
+        const response = await fetch(dbUrl, {
+            headers: {
+                'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+                'apikey': SERVICE_ROLE_KEY
             }
-            return new Response(simpleStringify({ error: `Failed to fetch task logs: ${error.message}` }), {
-                status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-            });
-        }
-        
-        if (!taskRun) {
-             return new Response(simpleStringify({ error: `Task run with ID ${taskRunId} not found (for logs)` }), {
-                status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-            });
-        }
-
-        // Potentially fetch more detailed logs from stack_runs associated with this task_run
-        const { data: stackRunsLogs, error: stackRunsError } = await adminSupabaseClient
-            .from('stack_runs')
-            .select('logs, created_at, service_name, method_name, status')
-            .eq('parent_task_run_id', taskRunId)
-            .order('created_at', { ascending: true });
-
-        let combinedLogs = {
-            taskRunLogs: taskRun.logs || [],
-            taskRunVMLogs: taskRun.vm_logs || [],
-            stackRunEventLogs: [],
-            status: taskRun.status,
-            error: taskRun.error
-        };
-
-        if (stackRunsError) {
-            hostLog(logPrefix, 'warn', `Could not fetch stack_run logs: ${stackRunsError.message}`);
-        } else if (stackRunsLogs) {
-            combinedLogs.stackRunEventLogs = stackRunsLogs.map(sr => ({
-                timestamp: sr.created_at,
-                service: sr.service_name,
-                method: sr.method_name,
-                status: sr.status,
-                logs: sr.logs || []
-            })) as any;
-        }
-        
-        return new Response(simpleStringify(combinedLogs), {
-            status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
         });
+        
+        if (!response.ok) {
+            const error = await response.text();
+            const errorMessage = `Database query failed: ${error}`;
+            hostLog(logPrefix, 'error', errorMessage);
+            return new Response(
+                simpleStringify({ error: `Failed to fetch task logs: ${errorMessage}` }),
+                { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const tasks = await response.json();
+        hostLog(logPrefix, 'info', `Database query successful. Found ${tasks.length} records.`);
+        
+        if (tasks.length === 0) {
+            return new Response(
+                simpleStringify({ error: `Task run with ID ${taskRunId} not found` }),
+                { status: 404, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+            );
+        }
+        
+        const taskRun = tasks[0];
+        
+        // Check for long-running tasks or special cases
+        if (taskRun.status === 'queued' || taskRun.status === 'processing') {
+            const createdAt = new Date(taskRun.created_at);
+            const now = new Date();
+            const diffInSeconds = Math.floor((now.getTime() - createdAt.getTime()) / 1000);
+            
+            // For long-running tasks, check if waiting on something
+            if (diffInSeconds > 60 && taskRun.waiting_on_stack_run_id) {
+                hostLog(logPrefix, 'warn', `Task has been running for ${diffInSeconds}s and is waiting on stack run ${taskRun.waiting_on_stack_run_id}`);
+                // Continue processing to return available logs
+            }
+        }
+        
+        // Get logs from the task run
+        const logs = taskRun.logs || [];
+        
+        // Also check for vm_logs
+        const vmLogs = taskRun.vm_logs || [];
+        
+        return new Response(
+            simpleStringify({ 
+                logs,
+                vm_logs: vmLogs
+            }),
+            { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         hostLog(logPrefix, 'error', `Exception in logsHandler: ${errorMessage}`);
-        return new Response(simpleStringify({ error: `Internal server error fetching logs: ${errorMessage}` }), {
-            status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-        });
+        return new Response(
+            simpleStringify({ error: `Internal server error: ${errorMessage}` }),
+            { status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        );
     }
 }
 
-
+// Start the Deno server and pass the tasksHandler for incoming requests
 serve(async (req: Request) => {
     const url = new URL(req.url);
-    const pathSegments = url.pathname.split("/").filter(Boolean); // e.g., ['tasks', 'execute']
-    const basePath = pathSegments[0]; // Should be 'tasks' for this function
-
-    hostLog(LOG_PREFIX_BASE, 'info', `Req: ${req.method} ${url.pathname}`);
-
+    const path = url.pathname.split("/").filter(Boolean); // Remove empty segments
+    
+    // Log request
+    hostLog(LOG_PREFIX_BASE, 'info', `Received request: ${req.method} ${url.pathname}`);
+    
     try {
-        if (basePath === "tasks") {
-            const action = pathSegments[1]; // 'execute', 'status', 'logs'
-            if (req.method === "POST" && action === "execute") {
-                return await tasksHandler(req);
-            } else if (req.method === "GET" && action === "status") {
-                return await statusHandler(req);
-            } else if (req.method === "GET" && action === "logs") {
-                return await logsHandler(req);
-            } else if (req.method === "OPTIONS") { // Catch-all OPTIONS for /tasks/*
-                 return new Response("ok", { headers: CORS_HEADERS });
-            }
-             else if (!action && req.method === "POST") { // Backward compatibility for POST /tasks
-                 hostLog(LOG_PREFIX_BASE, 'info', `Backward compatibility: POST /tasks routed to tasksHandler.`);
-                 return await tasksHandler(req);
+        // Routes handler
+        if (path.length >= 2 && path[0] === "tasks") {
+            if (path[1] === "execute") {
+                // Execute a task: POST /tasks/execute
+                return tasksHandler(req);
+            } else if (path[1] === "status") {
+                // Get task status: GET /tasks/status?id=xyz
+                return statusHandler(req);
+            } else if (path[1] === "logs") {
+                // Get task logs: GET /tasks/logs?id=xyz
+                return logsHandler(req);
+            } else {
+                // Default route for backward compatibility
+                return tasksHandler(req);
             }
         }
         
-        // Default root response or unmatched paths
-        hostLog(LOG_PREFIX_BASE, 'info', `Unmatched route: ${req.method} ${url.pathname}. Sending default info response.`);
+        // Handle root request or unknown paths
         return new Response(simpleStringify({
-            service: "Tasker Edge Function API",
-            version: "1.1.0", // Incremented version
+            service: "Tasker Edge Function",
+            version: "1.0.0",
             status: "running",
-            info: "See documentation for available endpoints.",
-            available_routes: {
-                "/tasks/execute": { "method": "POST", "description": "Execute a task asynchronously." },
-                "/tasks/status": { "method": "GET", "params": "id (query: taskRunId)", "description": "Get the status of a task run." },
-                "/tasks/logs": { "method": "GET", "params": "id (query: taskRunId)", "description": "Get logs for a task run." }
-            }
+            endpoints: [
+                "/tasks/execute [POST] - Execute a task",
+                "/tasks/status [GET] - Get task status",
+                "/tasks/logs [GET] - Get task logs"
+            ]
         }), {
-            status: (basePath === "tasks" && pathSegments.length > 1) ? 404 : 200, // 404 if /tasks/unknown, 200 for / or /tasks
+            status: 200,
             headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
     } catch (e: unknown) {
         const error = e instanceof Error ? e : new Error(String(e));
-        hostLog(LOG_PREFIX_BASE, 'error', "Unhandled error in main request router:", error.message, error.stack);
+        hostLog(LOG_PREFIX_BASE, 'error', "Unhandled error in request handler:", error.message);
         return new Response(simpleStringify({ 
             error: "Internal server error", 
             message: error.message 
@@ -517,5 +745,3 @@ serve(async (req: Request) => {
         });
     }
 });
-
-hostLog(LOG_PREFIX_BASE, 'info', "Tasker Edge Function server started.");

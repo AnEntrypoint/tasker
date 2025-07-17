@@ -5,7 +5,7 @@
  * This demonstrates the full suspend/resume mechanism with multiple GAPI calls
  */
 
-const SUPABASE_URL = "http://127.0.0.1:8000";
+const SUPABASE_URL = "http://127.0.0.1:8080";
 const SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
 
 // Parse command line arguments
@@ -25,6 +25,8 @@ Options:
   --query, -q <query>              Gmail search query (default: "" - all emails)
   --maxResultsPerUser <number>     Max email results per user (default: 3)
   --maxUsersPerDomain <number>     Max users to process per domain (default: 5)
+  --admin                          Search specifically for admin@coas.co.za emails
+  --no-wait                        Skip waiting for services (assume already running)
   --help, -h                       Show this help message
 
 Examples:
@@ -41,6 +43,9 @@ Examples:
 
   # Direct execution (bypasses npm)
   node comprehensive-gmail-search-cli.js --query "in:sent" --maxUsersPerDomain 1
+  
+  # Search specifically for admin@coas.co.za emails
+  node comprehensive-gmail-search-cli.js --admin --maxResultsPerUser 3
 
 Features:
   ✅ Discovers all Google Workspace domains automatically
@@ -80,6 +85,10 @@ function parseArguments(args) {
         options.maxUsersPerDomain = parseInt(nextArg);
         i++;
       }
+    } else if (arg === '--no-wait') {
+      options.noWait = true;
+    } else if (arg === '--admin') {
+      options.admin = true;
     }
   }
   
@@ -90,7 +99,7 @@ const options = parseArguments(args);
 
 // Default values with validation
 const input = {
-  gmailSearchQuery: options.query || "",
+  gmailSearchQuery: options.admin ? "from:admin@coas.co.za OR to:admin@coas.co.za" : (options.query || ""),
   maxResultsPerUser: Math.max(1, Math.min(options.maxResultsPerUser || 10, 100)),
   maxUsersPerDomain: Math.max(1, Math.min(options.maxUsersPerDomain || 1000, 10000))
 };
@@ -105,25 +114,35 @@ console.log("");
 
 async function runComprehensiveGmailSearch() {
   try {
-    console.log("⏳ Waiting for Supabase services to start...");
+    if (options.noWait) {
+      console.log("⚡ Skipping service wait - assuming services are already running");
+    } else {
+      console.log("⏳ Waiting for Supabase services to start...");
+    }
     
     // Retry logic to wait for server startup
-    const maxRetries = 30; // 30 seconds total
+    const maxRetries = options.noWait ? 1 : 30; // Skip wait if no-wait flag is set
     let retries = 0;
     let serviceAvailable = false;
     
     while (retries < maxRetries && !serviceAvailable) {
       try {
-        const healthCheck = await fetch(`${SUPABASE_URL}/functions/v1/tasks`, {
-          method: 'HEAD',
+        // For no-wait mode, use REST API to check if database is available
+        const healthCheckUrl = options.noWait ? 
+          `${SUPABASE_URL}/rest/v1/task_runs?select=count&limit=1` :
+          `${SUPABASE_URL}/functions/v1/tasks`;
+        
+        const healthCheck = await fetch(healthCheckUrl, {
+          method: options.noWait ? 'GET' : 'HEAD',
           headers: {
-            'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+            'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+            'apikey': SERVICE_ROLE_KEY
           }
         });
         
         if (healthCheck.ok || healthCheck.status === 405) {
           serviceAvailable = true;
-          console.log("✅ Supabase services are available");
+          console.log(options.noWait ? "✅ Supabase REST API is available" : "✅ Supabase services are available");
         } else {
           throw new Error("Service not ready");
         }
@@ -152,21 +171,37 @@ async function runComprehensiveGmailSearch() {
       console.log(""); // Clear the line
     }
     
-    console.log("⏳ Waiting for services to be fully ready...");
-    await new Promise(resolve => setTimeout(resolve, 15000)); // Give services time to fully initialize
+    if (!options.noWait) {
+      console.log("⏳ Waiting for services to be fully ready...");
+      await new Promise(resolve => setTimeout(resolve, 15000)); // Give services time to fully initialize
+    }
     
     console.log("📤 Submitting comprehensive Gmail search task...");
     
-    const response = await fetch(`${SUPABASE_URL}/functions/v1/tasks/execute`, {
+    // Use REST API directly in no-wait mode, edge function otherwise
+    const submitUrl = options.noWait ? 
+      `${SUPABASE_URL}/rest/v1/task_runs` :
+      `${SUPABASE_URL}/functions/v1/tasks/execute`;
+    
+    const submitBody = options.noWait ? 
+      JSON.stringify({
+        task_name: 'comprehensive-gmail-search',
+        input: input,
+        status: 'queued'
+      }) :
+      JSON.stringify({
+        taskName: 'comprehensive-gmail-search',
+        input: input
+      });
+    
+    const response = await fetch(submitUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`
+        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+        ...(options.noWait ? { 'apikey': SERVICE_ROLE_KEY, 'Prefer': 'return=representation' } : {})
       },
-      body: JSON.stringify({
-        taskName: 'comprehensive-gmail-search',
-        input: input
-      })
+      body: submitBody
     });
 
     if (!response.ok) {
@@ -176,13 +211,18 @@ async function runComprehensiveGmailSearch() {
 
     const result = await response.json();
     
-    if (!result.taskRunId) {
+    // Handle different response formats
+    const taskRunId = options.noWait ? 
+      (Array.isArray(result) ? result[0]?.id : result.id) : 
+      result.taskRunId;
+    
+    if (!taskRunId) {
       console.error("❌ Failed to get task run ID:", result);
       process.exit(1);
     }
     
     console.log(`✅ Task submitted successfully!`);
-    console.log(`📋 Task Run ID: ${result.taskRunId}`);
+    console.log(`📋 Task Run ID: ${taskRunId}`);
     console.log("");
     console.log("🔄 Monitoring comprehensive search progress...");
     console.log("This demonstrates the complete workflow:");
@@ -206,7 +246,7 @@ async function runComprehensiveGmailSearch() {
       attempts++;
       
       try {
-        const statusResponse = await fetch(`${SUPABASE_URL}/rest/v1/task_runs?id=eq.${result.taskRunId}&select=*`, {
+        const statusResponse = await fetch(`${SUPABASE_URL}/functions/v1/tasks/status?id=${taskRunId}`, {
           headers: {
             'Authorization': `Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU`,
             'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU'
@@ -214,12 +254,22 @@ async function runComprehensiveGmailSearch() {
         });
         
         if (!statusResponse.ok) {
-          console.log(`⚠️  Status check error: ${statusResponse.status}`);
+          const errorText = await statusResponse.text();
+          console.log(`❌ Status check failed: ${statusResponse.status} - ${errorText}`);
+          
+          // Exit immediately on critical errors
+          if (statusResponse.status === 404) {
+            console.log("💥 FATAL ERROR: Task not found in database");
+            process.exit(1);
+          } else if (statusResponse.status >= 500) {
+            console.log("💥 FATAL ERROR: Server error occurred");
+            process.exit(1);
+          }
+          
           continue;
         }
         
-        const taskData = await statusResponse.json();
-        const task = taskData[0];
+        const task = await statusResponse.json();
         
         if (!task) {
           console.log("⚠️  Task not found - may still be initializing...");
@@ -286,10 +336,16 @@ async function runComprehensiveGmailSearch() {
             // Show sample messages if available
             if (task.result.sampleMessages && task.result.sampleMessages.length > 0) {
               console.log("");
-              console.log("📬 Sample Messages:");
+              console.log("📧 ACTUAL EMAIL MESSAGES FOUND:");
+              console.log("================================");
               task.result.sampleMessages.forEach((msg, index) => {
-                console.log(`   ${index + 1}. From: ${msg.userEmail} (${msg.domain})`);
-                console.log(`      Snippet: ${msg.snippet.substring(0, 100)}...`);
+                console.log(`\n📨 EMAIL ${index + 1}:`);
+                console.log(`   Subject: ${msg.subject}`);
+                console.log(`   From: ${msg.from}`);
+                console.log(`   To: ${msg.userEmail}`);
+                console.log(`   Date: ${msg.date}`);
+                console.log(`   Domain: ${msg.domain}`);
+                console.log(`   Snippet: ${msg.snippet}`);
               });
             }
           } else {
@@ -341,7 +397,7 @@ async function runComprehensiveGmailSearch() {
     console.log("The comprehensive search is still running but monitoring has reached the time limit.");
     console.log(`⏱️  Total monitoring time: ${Math.round((Date.now() - startTime) / 1000)}s`);
     console.log(`📊 Final status: ${lastStatus.toUpperCase()}`);
-    console.log(`🔗 Task ID: ${result.taskRunId}`);
+    console.log(`🔗 Task ID: ${taskRunId}`);
     console.log("");
     console.log("💡 The task will continue running in the background.");
     console.log("   You can check its status manually in the database or restart monitoring.");

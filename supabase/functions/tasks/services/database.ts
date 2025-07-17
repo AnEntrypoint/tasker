@@ -1,40 +1,51 @@
 import { createServiceProxy } from "npm:sdk-http-wrapper@1.0.10/client";
-// import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts"; // Removed dotenv
+import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 
-// config({ export: true }); // Removed dotenv
+config({ export: true });
 
 // Helper to determine the correct wrappedsupabase proxy URL
 function getWrappedSupabaseProxyUrl(): string {
   const extSupabaseUrl = Deno.env.get('EXT_SUPABASE_URL');
-  const defaultEdgeFunctionsUrl = "http://127.0.0.1:8000"; // Default for local edge functions
+  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+  
+  // Always use localhost:54321 for local development REST API
+  const defaultUrl = "http://localhost:54321";
+  const edgeFunctionsUrl = "http://127.0.0.1:8000";
 
   if (extSupabaseUrl) {
-    console.log("[database.ts] Using EXT_SUPABASE_URL for wrappedsupabase base:", extSupabaseUrl);
+    // If using local development URL for edge functions, use REST API URL instead
+    if (extSupabaseUrl.includes('127.0.0.1:8000')) {
+      console.log("[database.ts] Found edge functions URL in EXT_SUPABASE_URL, using REST API URL instead:", defaultUrl);
+      return `${defaultUrl}/functions/v1/wrappedsupabase`;
+    }
+    console.log("[database.ts] Using EXT_SUPABASE_URL for wrappedsupabase:", extSupabaseUrl);
     return `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
+  } else if (supabaseUrl) {
+    // If using local development URL for edge functions, use REST API URL instead
+    if (supabaseUrl.includes('127.0.0.1:8000')) {
+      console.log("[database.ts] Found edge functions URL in SUPABASE_URL, using REST API URL instead:", defaultUrl);
+      return `${defaultUrl}/functions/v1/wrappedsupabase`;
+    }
+    console.log("[database.ts] Using SUPABASE_URL for wrappedsupabase:", supabaseUrl);
+    return `${supabaseUrl}/functions/v1/wrappedsupabase`;
+  } else {
+    console.log("[database.ts] Neither EXT_SUPABASE_URL nor SUPABASE_URL found in environment. Using default:", defaultUrl);
+    return `${defaultUrl}/functions/v1/wrappedsupabase`;
   }
-  console.warn("[database.ts] EXT_SUPABASE_URL not found. Falling back to default for wrappedsupabase proxy.");
-  return `${defaultEdgeFunctionsUrl}/functions/v1/wrappedsupabase`;
 }
 
 const WRAPPED_SUPABASE_PROXY_URL = getWrappedSupabaseProxyUrl();
-
-// Rely primarily on EXT_ prefixed variables provided by Supabase Edge Runtime
 const SERVICE_ROLE_KEY = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
-                          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"; // Hardcoded fallback
+                          Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || 
+                          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU";
 
-const ANON_KEY = Deno.env.get('EXT_SUPABASE_ANON_KEY') ||
-                 "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"; // Hardcoded fallback
-
-if (!Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY')) {
-  console.warn("[database.ts] EXT_SUPABASE_SERVICE_ROLE_KEY not found in environment. Using hardcoded fallback.");
-}
-if (!Deno.env.get('EXT_SUPABASE_ANON_KEY')) {
-  console.warn("[database.ts] EXT_SUPABASE_ANON_KEY not found in environment. Using hardcoded fallback.");
+if (!SERVICE_ROLE_KEY) {
+  console.error("[database.ts] EXT_SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY not found in environment.");
+  throw new Error("Supabase Service Role Key not configured.");
 }
 
 console.log("[database.ts] Final wrappedsupabase proxy baseUrl:", WRAPPED_SUPABASE_PROXY_URL);
-console.log("[database.ts] Using service role key (from EXT_SUPABASE_SERVICE_ROLE_KEY or fallback):", SERVICE_ROLE_KEY ? '[REDACTED]' : 'undefined');
-console.log("[database.ts] Using anon key (from EXT_SUPABASE_ANON_KEY or fallback):", ANON_KEY ? '[REDACTED]' : 'undefined');
+console.log("[database.ts] Using service role key:", SERVICE_ROLE_KEY ? '[REDACTED]' : 'undefined');
 
 /**
  * Interface for tracked deleted items in global scope
@@ -104,23 +115,15 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
     // If SDK wrapper fails, try direct fetch
     console.log(`[INFO] Falling back to direct fetch for task: ${taskId || taskName}`);
     
-    // For direct fetch, target the KONG URL ( Supabase REST API endpoint)
-    // EXT_SUPABASE_URL should point to the functions server (e.g., http://127.0.0.1:8000)
-    // SUPABASE_URL (if set by runtime) might be http://kong:8000
-    const directDbBaseUrl = Deno.env.get('SUPABASE_URL') || 'http://127.0.0.1:8000'; // Prefer SUPABASE_URL if available (kong), else public functions URL
-
-    // Keys for direct fetch should also prioritize EXT_ versions from the runtime
-    const currentServiceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || SERVICE_ROLE_KEY;
-    const currentAnonKey = Deno.env.get('EXT_SUPABASE_ANON_KEY') || ANON_KEY;
+    const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+    const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                           Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     
-    if (!currentServiceRoleKey) {
-      throw new Error("Service role key not available for direct fetch (after checking EXT_ and fallback)");
-    }
-    if (!currentAnonKey) {
-      throw new Error("Anon key not available for direct fetch (after checking EXT_ and fallback)");
+    if (!serviceRoleKey) {
+      throw new Error("Service role key not available for direct fetch");
     }
     
-    let url = `${directDbBaseUrl}/rest/v1/task_functions?`;
+    let url = `${baseUrl}/rest/v1/task_functions?`;
     
     if (taskId && !isNaN(Number(taskId))) {
       url += `select=*&id=eq.${encodeURIComponent(taskId)}`;
@@ -137,8 +140,8 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${currentServiceRoleKey}`,
-        'apikey': currentAnonKey // CORRECTED: Use Anon Key for apikey
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey
       }
     });
     

@@ -16,6 +16,12 @@
 - Stack processor was failing due to incorrect column name: `parent_run_id` should be `parent_stack_run_id`
 - Added retry logic in comprehensive-gmail-search-cli.js to wait up to 30 seconds for server startup
 
+## Testing Principles
+- Never use any mocks or fake data: We only want to test the code and data in its working condition
+
+## Debugging and Development Workflow
+- Use the MCP REPL tool instead of curl, and use it as much as possible for debugging and discovering problems and also to test things in Deno quickly
+
 ## Docker & Supabase Setup
 
 ### Docker Installation and Setup

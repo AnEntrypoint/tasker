@@ -13,12 +13,13 @@ import {
 	QuickJSAsyncWASMModule,
 	QuickJSHandle,
 	newAsyncContext,
-	QuickJSAsyncContext,
-	QuickJSDeferredPromise
-} from "quickjs-emscripten";
-import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+	QuickJSDeferredPromise,
+	newQuickJSWASMModule
+} from "npm:quickjs-emscripten@0.20.0";
+// Removed direct Supabase import - using wrappedsupabase proxy instead
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { generateServiceProxy } from './proxy-generator.ts';
+import { globalResolvers } from './proxy-generator.ts';
 
 import {
 	getStackRun,
@@ -71,11 +72,11 @@ function createHandleFromJson(context: QuickJSContext, jsValue: any, handles: Qu
 	switch (typeof jsValue) {
 		case 'string': 
 			const strHandle = context.newString(jsValue); 
-			handles.push(strHandle); 
+			if (handles) handles.push(strHandle); 
 			return strHandle;
 		case 'number': 
 			const numHandle = context.newNumber(jsValue); 
-			handles.push(numHandle); 
+			if (handles) handles.push(numHandle); 
 			return numHandle;
 		case 'boolean': 
 			const boolHandle = jsValue ? context.true : context.false; 
@@ -102,11 +103,16 @@ function createHandleFromJson(context: QuickJSContext, jsValue: any, handles: Qu
  */
 function createArrayHandle(context: QuickJSContext, array: any[], handles: QuickJSHandle[]): QuickJSHandle {
 	const arrayHandle = context.newArray(); 
-	handles.push(arrayHandle);
+	if (handles) handles.push(arrayHandle);
 	
 	array.forEach((item, index) => {
 		const itemHandle = createHandleFromJson(context, item, handles);
 		context.setProp(arrayHandle, index, itemHandle);
+		// Dispose the item handle after setting it as property
+		if (itemHandle && itemHandle !== context.true && itemHandle !== context.false && 
+			itemHandle !== context.null && itemHandle !== context.undefined) {
+			itemHandle.dispose();
+		}
 	});
 	
 	return arrayHandle;
@@ -117,12 +123,17 @@ function createArrayHandle(context: QuickJSContext, array: any[], handles: Quick
  */
 function createObjectHandle(context: QuickJSContext, obj: any, handles: QuickJSHandle[]): QuickJSHandle {
 	const objHandle = context.newObject(); 
-	handles.push(objHandle);
+	if (handles) handles.push(objHandle);
 	
 	for (const key in obj) {
 		if (Object.prototype.hasOwnProperty.call(obj, key)) {
 			const valueHandle = createHandleFromJson(context, obj[key], handles);
 			context.setProp(objHandle, key, valueHandle);
+			// Dispose the value handle after setting it as property
+			if (valueHandle && valueHandle !== context.true && valueHandle !== context.false && 
+				valueHandle !== context.null && valueHandle !== context.undefined) {
+				valueHandle.dispose();
+			}
 		}
 	}
 	
@@ -138,32 +149,30 @@ async function __saveEphemeralCall__(
 	methodName: string,
 	args: any[],
 	taskRunId?: string,
-	parentStackRunId?: string,
-	taskCode?: string,
-	taskName?: string
+	parentStackRunId?: string
 ): Promise<boolean> {
 	try {
 		hostLog("EphemeralCall", "info", `Saving ephemeral call ${stackRunId} for ${serviceName}.${methodName}`);
 		
 		const finalTaskRunId = taskRunId || _generateUUID();
 		
-            await saveStackRun(
-                serviceName, 
-                methodName,
-                args,
+		await saveStackRun(
+			serviceName, 
+			methodName,
+			args,
 			{ 
 				stackRunId, 
 				suspended: true, 
 				suspendedAt: new Date().toISOString(), 
 				taskRunId: finalTaskRunId,
-				taskCode: taskCode || "",
-				taskName: taskName || serviceName,
+				taskCode: "",
+				taskName: serviceName,
 				taskInput: args
 			},
 			finalTaskRunId,
-                parentStackRunId
-            );
-            
+			parentStackRunId
+		);
+		
 		hostLog("EphemeralCall", "info", `Successfully saved stack run ${stackRunId}`);
 		return true;
 	} catch (error: unknown) {
@@ -181,7 +190,7 @@ async function __saveEphemeralCall__(
  * Set up the task environment with console and required tools
  */
 async function setupTaskEnvironment(
-	ctx: QuickJSAsyncContext,
+	ctx: QuickJSContext,
 	taskRunId: string,
 	taskCode: string,
 	taskName: string,
@@ -190,6 +199,7 @@ async function setupTaskEnvironment(
 	toolNames?: string[]
 ): Promise<void> {
 	setupConsoleObject(ctx);
+	
 	setupHostToolCaller(ctx, taskRunId);
 	
 	if (taskRunId) {
@@ -205,13 +215,14 @@ async function setupTaskEnvironment(
 	}
 	
 	setupModuleExports(ctx);
+	
 	setupToolsObject(ctx, taskRunId, taskCode, taskName, taskInput, toolNames);
 }
 
 /**
  * Set up console object in VM
  */
-function setupConsoleObject(ctx: QuickJSAsyncContext): void {
+function setupConsoleObject(ctx: QuickJSContext): void {
 	const consoleObj = ctx.newObject();
 	
 	const levels = ["log", "info", "warn", "error", "debug"] as const;
@@ -221,20 +232,11 @@ function setupConsoleObject(ctx: QuickJSAsyncContext): void {
 				const stringArgs = argHandles.map(arg => {
 					try {
 						if (ctx.typeof(arg) === 'string') return ctx.getString(arg);
-						if (ctx.typeof(arg) === 'number') return String(ctx.getNumber(arg));
-						if (ctx.typeof(arg) === 'boolean') return String(ctx.dump(arg));
-						if (ctx.typeof(arg) === 'undefined') return 'undefined';
-						if (ctx.typeof(arg) === 'null') return 'null';
 						
-						// For objects, be more careful with dump
-						try {
-							const dumped = ctx.dump(arg);
-							return typeof dumped === 'string' ? dumped : simpleStringify(dumped);
-						} catch (dumpError) {
-							return `[Object dump failed: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}]`;
-						}
+						const dumped = ctx.dump(arg);
+						return typeof dumped === 'string' ? dumped : simpleStringify(dumped);
 					} catch (e) {
-						return `[Unloggable Object: ${e instanceof Error ? e.message : String(e)}]`;
+						return "[Unloggable Object]";
 					}
 				}).join(' ');
 				
@@ -254,73 +256,59 @@ function setupConsoleObject(ctx: QuickJSAsyncContext): void {
 		}
 
 /**
- * Set up the host tool caller function for direct service calls
+ * Set up the host tool caller function for suspend/resume mechanism
  */
-function setupHostToolCaller(ctx: QuickJSAsyncContext, taskRunId: string): void {
+function setupHostToolCaller(ctx: QuickJSContext, taskRunId: string): void {
 	const callHostToolFn = ctx.newFunction("__callHostTool__", (
 		serviceNameHandle: QuickJSHandle,
 		methodChainHandle: QuickJSHandle,
 		argsHandle: QuickJSHandle
 	) => {
-		const handles: QuickJSHandle[] = [serviceNameHandle, methodChainHandle, argsHandle];
-		
 		try {
+			hostLog("HostToolSuspend", "info", `__callHostTool__ called for taskRunId: ${taskRunId}`);
+			
 			const serviceName = ctx.getString(serviceNameHandle);
 			
 			const methodChainArray: string[] = [];
 			const methodChainLen = ctx.getNumber(ctx.getProp(methodChainHandle, "length"));
-			for (let i=0; i<methodChainLen; i++) {
+			for (let i = 0; i < methodChainLen; i++) {
 				const partHandle = ctx.getProp(methodChainHandle, i);
-				handles.push(partHandle);
 				methodChainArray.push(ctx.getString(partHandle));
+				partHandle.dispose(); // Dispose immediately after use
 			}
 			const methodName = methodChainArray.join('.');
 			
 			const args = ctx.dump(argsHandle);
 			
-			hostLog("HostToolSuspend", "info", `🚨 TRIGGERING SUSPENSION for ${serviceName}.${methodName}`);
-			hostLog("HostToolSuspend", "info", `Args: ${JSON.stringify(args)}`);
+			hostLog("HostToolSuspend", "info", `Suspending VM for ${serviceName}.${methodName}`);
 			
-			const childStackRunId = _generateUUID();
+			// Set up suspend information
+			const suspensionStackRunId = crypto.randomUUID();
+			const suspendInfo = {
+				suspended: true,
+				stackRunId: suspensionStackRunId,
+				serviceName: serviceName,
+				method: methodName,
+				args: args || [],
+				taskRunId: taskRunId,
+				timestamp: new Date().toISOString()
+			};
 			
-			// Set up the __pendingServiceCall__ global for resolvePromiseAndSuspend to pick up
-			const pendingCallObj = ctx.newObject();
-			ctx.setProp(pendingCallObj, "stackRunId", ctx.newString(childStackRunId));
-			ctx.setProp(pendingCallObj, "service", ctx.newString(serviceName));
-			ctx.setProp(pendingCallObj, "method", ctx.newString(methodName));
-			const argsHandleForPending = createHandleFromJson(ctx, args, []);
-			ctx.setProp(pendingCallObj, "args", argsHandleForPending);
-			argsHandleForPending.dispose();
-			ctx.setProp(ctx.global, "__pendingServiceCall__", pendingCallObj);
-			pendingCallObj.dispose();
-
-			hostLog("HostToolSuspend", "info", `🔄 Set __pendingServiceCall__ for ${serviceName}.${methodName}. ChildStackRunID: ${childStackRunId}. VM will suspend.`);
-
-			// FINAL WORKING FIX: Create suspension marker as QuickJS handle for proper type handling
-			const suspensionMarkerObj = ctx.newObject();
-			ctx.setProp(suspensionMarkerObj, "__vmSuspension__", ctx.newString("true"));
-			ctx.setProp(suspensionMarkerObj, "stackRunId", ctx.newString(childStackRunId));
-			ctx.setProp(suspensionMarkerObj, "reason", ctx.newString("host_service_call"));
+			const suspendInfoHandle = createHandleFromJson(ctx, suspendInfo, []);
+			ctx.setProp(ctx.global, "__suspendInfo__", suspendInfoHandle);
+			suspendInfoHandle.dispose();
 			
-			hostLog("HostToolSuspend", "info", `📤 Returning suspension marker as QuickJS handle`);
+			hostLog("HostToolSuspend", "info", `VM suspended for ${serviceName}.${methodName}`);
 			
-			return suspensionMarkerObj; // Return QuickJS handle - properly typed
+			// Return a placeholder that will be replaced when resumed
+			return ctx.newString("__SUSPENDED__");
+			
 		} catch (error) {
 			const errorMsg = error instanceof Error ? error.message : String(error);
-			hostLog("HostToolSuspend", "error", `Error setting up suspension: ${errorMsg}`);
+			hostLog("HostToolSuspend", "error", `Error in API call: ${errorMsg}`);
 			
 			const qjsError = ctx.newError(errorMsg);
-			const deferred = ctx.newPromise();
-			deferred.reject(qjsError);
-			return deferred.handle;
-		} finally {
-			handles.forEach(h => { 
-				try {
-					h?.dispose();
-				} catch (e) {
-					// Ignore disposal errors
-				}
-			});
+			return qjsError;
 		}
 	});
 	
@@ -331,7 +319,7 @@ function setupHostToolCaller(ctx: QuickJSAsyncContext, taskRunId: string): void 
 /**
  * Set up module exports object
  */
-function setupModuleExports(ctx: QuickJSAsyncContext): void {
+function setupModuleExports(ctx: QuickJSContext): void {
 	const moduleObj = ctx.newObject();
 	const exportsObj = ctx.newObject();
 	ctx.setProp(moduleObj, "exports", exportsObj);
@@ -344,7 +332,7 @@ function setupModuleExports(ctx: QuickJSAsyncContext): void {
  * Setup the tools object in the VM using generateServiceProxy
  */
 function setupToolsObject(
-	ctx: QuickJSAsyncContext, 
+	ctx: QuickJSContext, 
 	taskRunId: string,
 	taskCode: string,
 	taskName: string,
@@ -363,28 +351,17 @@ function setupToolsObject(
 	
 	for (const toolName of finalToolNames) {
 		hostLog(logPrefix, "info", `Adding service proxy for: ${toolName}`);
-		
-		// Use standard service proxy for all services including GAPI to avoid lifetime issues
-		try {
-			if (toolName === "gapi") {
-				hostLog(logPrefix, "info", `Creating GAPI service proxy using standard service proxy method...`);
-			}
-			const serviceProxyHandle = createServiceProxyObject(ctx, toolName, taskRunId);
-			ctx.setProp(toolsObj, toolName, serviceProxyHandle);
-			serviceProxyHandle.dispose();
-			hostLog(logPrefix, "info", `Successfully added ${toolName} service proxy`);
-		} catch (serviceError) {
-			hostLog(logPrefix, "error", `Failed to create ${toolName} proxy: ${serviceError instanceof Error ? serviceError.message : String(serviceError)}`);
-			// Continue without this service proxy
-		}
+		const serviceProxyHandle = generateServiceProxy(ctx, taskRunId, taskCode, taskName, taskInput);
+		ctx.setProp(toolsObj, toolName, serviceProxyHandle);
+		serviceProxyHandle.dispose();
 	}
 	
 	const tasksServiceObj = ctx.newObject();
 	
-	const executeFn = ctx.newAsyncifiedFunction("execute", async (
+	const executeFn = ctx.newFunction("execute", (
 		taskNameHandle: QuickJSHandle, 
 		inputHandle: QuickJSHandle
-	): Promise<QuickJSHandle> => {
+	): QuickJSHandle => {
 		const tempHandles: QuickJSHandle[] = [taskNameHandle, inputHandle];
 		try {
 			const targetTaskName = ctx.getString(taskNameHandle);
@@ -406,62 +383,28 @@ function setupToolsObject(
 				taskInput
 			); 
 			
-			await saveStackRun(
-				"tasks",
-				"suspend_for_child_task",
-				[targetTaskName, targetTaskInput],
-				callingVmState,
-				parentTaskRunId,
-				ctx.dump(ctx.getProp(ctx.global, "__currentStackRunId__")) || undefined
-			);
-			hostLog(logPrefix, "info", `Parent task ${taskName} (${parentTaskRunId}) suspended, state saved (waiting on ${childStackRunId}).`);
-
-			const childVmState: SerializedVMState = {
-				stackRunId: childStackRunId,
-				taskRunId: parentTaskRunId,
-				suspended: false,
-				suspendedAt: new Date().toISOString(),
-				taskCode: "", // Will be populated by task execution
-				taskName: targetTaskName,
-				taskInput: targetTaskInput,
-				parentStackRunId: callingVmState.stackRunId
-			};
-
-			const childTaskStackRun: Partial<StackRun> & {id: string} = {
-				id: childStackRunId,
-				parent_task_run_id: parentTaskRunId,
-				parent_stack_run_id: callingVmState.stackRunId,
-				service_name: "tasks",
-				method_name: "execute",
+			// For regular context, we use the suspend mechanism
+			hostLog(logPrefix, "info", `Suspending VM for tasks.execute(${targetTaskName})`);
+			
+			// Set up suspend information for task execution
+			const suspendInfo = {
+				service: "tasks",
+				method: "execute",
 				args: [targetTaskName, targetTaskInput],
-				status: "pending",
-				vm_state: childVmState,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				taskRunId: parentTaskRunId,
+				childStackRunId: childStackRunId,
+				timestamp: new Date().toISOString()
 			};
-
-			const supabase = getSupabaseClient();
-			if (!supabase) {
-				throw new Error("Supabase client not available");
-			}
-			const { error: childSaveError } = await supabase.from("stack_runs").insert(childTaskStackRun);
-			if (childSaveError) {
-				hostLog(logPrefix, "error", `Failed to create initial stack_run for child task ${targetTaskName}: ${childSaveError.message}`);
-				throw childSaveError;
-			}
-			hostLog(logPrefix, "info", `Child task ${targetTaskName} stack_run ${childStackRunId} created for execution.`);
-
-		await triggerStackProcessor();
+			
+			const suspendInfoHandle = createHandleFromJson(ctx, suspendInfo, []);
+			ctx.setProp(ctx.global, "__suspendInfo__", suspendInfoHandle);
+			suspendInfoHandle.dispose();
+			
+			hostLog(logPrefix, "info", `VM suspended for tasks.execute(${targetTaskName})`);
 		
-			const deferred = ctx.newPromise();
-			tempHandles.push(deferred.handle);
-
-			// Store promise resolvers in global map instead of QuickJS object  
-			const resolvers = new Map();
-			ctx.setProp(ctx.global, "__resumeResolverIds__", ctx.newString(callingVmState.stackRunId));
-
-			return deferred.handle;
-	} catch (error) {
+			// Return suspend placeholder for regular context
+			return ctx.newString("__SUSPENDED__");
+			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error);
 			hostLog(logPrefix, "error", `Error in tasks.execute interceptor: ${errorMsg}`);
 			tempHandles.push(ctx.newError(errorMsg));
@@ -479,16 +422,6 @@ function setupToolsObject(
 	ctx.setProp(ctx.global, "tools", toolsObj);
 	toolsObj.dispose();
 	
-	// Debug: verify tools object was set correctly
-	const toolsVerifyHandle = ctx.getProp(ctx.global, "tools");
-	hostLog(logPrefix, "info", `Tools object verification: ${ctx.typeof(toolsVerifyHandle)}`);
-	if (ctx.typeof(toolsVerifyHandle) === 'object') {
-		const gapiVerifyHandle = ctx.getProp(toolsVerifyHandle, "gapi");
-		hostLog(logPrefix, "info", `Tools.gapi verification: ${ctx.typeof(gapiVerifyHandle)}`);
-		gapiVerifyHandle.dispose();
-	}
-	toolsVerifyHandle.dispose();
-	
 	hostLog(logPrefix, "info", "Tools object setup complete with service proxies.");
 }
 
@@ -504,11 +437,9 @@ function setupToolsObject(
  * Get Supabase configuration
  */
 function getSupabaseConfig() {
-	let url = Deno.env.get("EXT_SUPABASE_URL") || Deno.env.get("SUPABASE_URL") || "http://localhost:54321";
+	let url = Deno.env.get("EXT_SUPABASE_URL") || Deno.env.get("SUPABASE_URL") || "http://127.0.0.1:8080";
 	const serviceRoleKey = Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 	
-	if (url.includes('localhost:8000') || url.includes('127.0.0.1:8000')) {
-	}
 	if (!serviceRoleKey) {
 		hostLog("SupabaseConfig", "error", "Missing SUPABASE_SERVICE_ROLE_KEY");
 	}
@@ -518,80 +449,10 @@ function getSupabaseConfig() {
 
 /**
  * Creates a service proxy object that can handle nested method chains
- * Used for non-GAPI services (database, keystore, openai, websearch)
+ * THIS IS NOW REPLACED BY proxy-generator.ts:generateServiceProxy
+ * Keeping structure for reference or if a non-suspending proxy is ever needed.
  */
-function createServiceProxyObject(ctx: QuickJSAsyncContext, serviceName: string, taskRunId: string): QuickJSHandle {
-	const logPrefix = `ServiceProxy-${serviceName}-${taskRunId}`;
-	hostLog(logPrefix, "info", `Creating new dynamic suspension-aware proxy for service: ${serviceName}`);
-
-	// This function will be called recursively to build up the proxy chain (e.g., tools.database.from(...).select(...))
-	function buildProxy(methodChain: string[]): QuickJSHandle {
-		const proxyTarget = ctx.newFunction(methodChain.join('.') || serviceName, (...argHandles: QuickJSHandle[]) => {
-			// This is when a method in the chain is actually CALLED (e.g. select(columns) or insert(data))
-			const finalArgs = argHandles.map(h => ctx.dump(h));
-			const finalMethodName = methodChain.join('.');
-			hostLog(logPrefix, "info", `🚨 CRITICAL: Service method ${serviceName}.${finalMethodName} invoked with args:`, finalArgs);
-			hostLog(logPrefix, "info", `🚨 CRITICAL: This proves the proxy function is being called and should trigger suspension`);
-
-			const childStackRunId = _generateUUID();
-
-			// Set up the __pendingServiceCall__ global for resolvePromiseAndSuspend to pick up
-			const pendingCallObj = ctx.newObject();
-			ctx.setProp(pendingCallObj, "stackRunId", ctx.newString(childStackRunId));
-			ctx.setProp(pendingCallObj, "service", ctx.newString(serviceName));
-			ctx.setProp(pendingCallObj, "method", ctx.newString(finalMethodName)); // Full method chain
-			const argsHandle = createHandleFromJson(ctx, finalArgs, []); // Handles are managed by createHandleFromJson
-			ctx.setProp(pendingCallObj, "args", argsHandle);
-			argsHandle.dispose(); // Dispose the args array handle itself after setting it
-			// taskRunId is already available in resolvePromiseAndSuspend
-			ctx.setProp(ctx.global, "__pendingServiceCall__", pendingCallObj);
-			pendingCallObj.dispose();
-
-			hostLog(logPrefix, "info", `Set __pendingServiceCall__ for ${serviceName}.${finalMethodName}. ChildStackRunID: ${childStackRunId}. VM will suspend.`);
-
-			// Return a promise that will resolve to a suspension marker
-			// This ensures that await properly triggers the suspension handling
-			const deferred = ctx.newPromise();
-			
-			// Set the suspension marker as the promise result
-			const suspensionMarker = ctx.newObject();
-			ctx.setProp(suspensionMarker, "__vmSuspension__", ctx.true);
-			ctx.setProp(suspensionMarker, "stackRunId", ctx.newString(childStackRunId));
-			ctx.setProp(suspensionMarker, "reason", ctx.newString("host_service_call"));
-			
-			// Resolve the promise with the suspension marker immediately
-			deferred.resolve(suspensionMarker);
-			suspensionMarker.dispose();
-			
-			return deferred.handle; // This will be awaited and caught by resolvePromiseAndSuspend
-		});
-
-		return new Proxy(proxyTarget, {
-			get: (target, prop, receiver) => {
-				if (typeof prop === 'symbol') { // Handle symbols like Symbol.toPrimitive if necessary
-					return Reflect.get(target, prop, receiver);
-				}
-				const propName = String(prop);
-				hostLog(logPrefix, "info", `Proxy GET: ${serviceName}.${[...methodChain, propName].join('.')} - this shows tools are being accessed`);
-				
-				// If it's a call to .then, .catch, .finally (promise-like behavior), 
-				// this means the user is trying to await the result of the proxy function call.
-				// We should not return these properties on the proxy itself, only on the result
-				// of calling the proxy function.
-				if (propName === 'then' || propName === 'catch' || propName === 'finally') {
-					hostLog(logPrefix, "info", `Promise-like property ${propName} accessed on proxy - returning undefined to allow proper execution`);
-					return undefined; // Return JavaScript undefined, not ctx.undefined
-				}
-
-				// Recursively build the proxy for the next segment of the method chain
-				return buildProxy([...methodChain, propName]);
-			},
-			// apply: is handled by the proxyTarget function itself when the chain is called.
-		});
-	}
-
-	return buildProxy([]); // Start with an empty method chain for the service root
-}
+// function createServiceProxyObject(ctx: QuickJSAsyncContext, serviceName: string, taskRunId: string): QuickJSHandle { ... }
 
 // ==============================
 // Main Execution Functions
@@ -610,8 +471,8 @@ async function executeQuickJS(
 	providedStackRunId?: string
 ): Promise<any> {
 	const logPrefix = `QuickJS-${taskName}`;
-	let quickJSInstance: QuickJSAsyncWASMModule | null = null;
-	let ctx: QuickJSAsyncContext | null = null;
+	let quickJSInstance: QuickJSWASMModule | null = null;
+	let ctx: QuickJSContext | null = null;
 	
 	try {
 		hostLog(logPrefix, "info", `Initializing QuickJS for ${taskName}${initialVmState ? ' (resuming from checkpoint)' : ''}`);
@@ -621,190 +482,46 @@ async function executeQuickJS(
 			hostLog(logPrefix, "info", `VM State Debug - suspended: ${initialVmState.suspended}, waitingOnStackRunId: ${initialVmState.waitingOnStackRunId}`);
 		}
 		
-		hostLog(logPrefix, "debug", `Step 1: Getting QuickJS instance...`);
-		quickJSInstance = await getQuickJS() as QuickJSAsyncWASMModule;
-		hostLog(logPrefix, "debug", `Step 2: QuickJS instance obtained successfully`);
+		hostLog(logPrefix, "info", `About to load QuickJS WASM module...`);
+		try {
+			quickJSInstance = await getQuickJS();
+			hostLog(logPrefix, "info", `QuickJS WASM module loaded successfully`);
+		} catch (wasmError) {
+			hostLog(logPrefix, "error", `Failed to load QuickJS WASM module: ${wasmError instanceof Error ? wasmError.message : String(wasmError)}`);
+			throw wasmError;
+		}
 		
-		// For async operations, create a context that supports asyncify
-		hostLog(logPrefix, "debug", `Step 3: Creating async context...`);
-		ctx = await newAsyncContext();
-		hostLog(logPrefix, "debug", `Step 4: Async context created successfully`);
+		// Try regular context creation first to test basic functionality
+		hostLog(logPrefix, "info", `About to create QuickJS context...`);
+		try {
+			const runtime = quickJSInstance.newRuntime();
+			ctx = runtime.newContext();
+			hostLog(logPrefix, "info", `QuickJS context created successfully`);
+		} catch (contextError) {
+			hostLog(logPrefix, "error", `Failed to create QuickJS context: ${contextError instanceof Error ? contextError.message : String(contextError)}`);
+			throw contextError;
+		}
 		
 		const taskRunId = providedTaskRunId || initialVmState?.taskRunId || _generateUUID();
-		const stackRunId = providedStackRunId || initialVmState?.stackRunId;
+		const stackRunId = providedStackRunId || initialVmState?.stackRunId || _generateUUID();
 		
-		hostLog(logPrefix, "debug", `Step 5: Setting up task environment...`);
-		try {
-			await setupTaskEnvironment(ctx!, taskRunId, taskCode, taskName, taskInput, stackRunId, toolNames);
-			hostLog(logPrefix, "debug", `Step 6: Task environment setup complete`);
-		} catch (setupError) {
-			hostLog(logPrefix, "error", `Setup environment failed: ${setupError instanceof Error ? setupError.message : String(setupError)}`);
-			throw setupError;
-		}
+		await setupTaskEnvironment(ctx!, taskRunId, taskCode, taskName, taskInput, stackRunId, toolNames);
 		
 		let resultOrPromise: QuickJSHandle;
 
-		if (initialVmState && (initialVmState.waitingOnStackRunId || initialVmState.last_call_result || initialVmState.resume_payload)) {
+		if (initialVmState && initialVmState.suspended && (initialVmState.waitingOnStackRunId || initialVmState.last_call_result)) {
 			hostLog(logPrefix, "info", `Resuming from checkpoint for stackRunId: ${initialVmState.stackRunId || 'undefined'}`);
 			
-			// FIX: Use the resume payload to inject cached results
+			// REAL SOLUTION: Use step-based execution with cached results
+			const checkpointData = initialVmState.checkpoint || {};
 			const resumePayload = initialVmState.resume_payload || initialVmState.last_call_result;
 			
 			if (resumePayload) {
-				hostLog(logPrefix, "info", `Injecting resume payload and continuing execution`);
+				// Generate checkpoint-aware task code that skips completed steps
+				const checkpointTaskCode = generateCheckpointAwareTaskCode(taskCode, initialVmState);
+				const taskHandler = await evaluateTaskCode(ctx!, checkpointTaskCode, logPrefix, false);
 				
-				// CRITICAL FIX: Properly inject the resume result for the task's state management
-				const resumeResultHandle = createHandleFromJson(ctx!, resumePayload, []);
-				ctx!.setProp(ctx!.global, "__resumeResult__", resumeResultHandle);
-				resumeResultHandle.dispose();
-				
-				// CRITICAL FIX: Determine the call type from the VM state and inject it
-				let lastCallType = "unknown";
-				const waitingStackRunId = initialVmState.waitingOnStackRunId || initialVmState.stackRunId;
-				
-				// Try to determine call type from the resume payload or method name
-				if (resumePayload && typeof resumePayload === 'object') {
-					if (resumePayload.domains) {
-						lastCallType = "domains";
-						hostLog(logPrefix, "info", `Detected domains.list result, setting lastCallType to "domains"`);
-					} else if (resumePayload.users) {
-						lastCallType = "users";
-						hostLog(logPrefix, "info", `Detected users.list result, setting lastCallType to "users"`);
-					} else if (resumePayload.messages) {
-						lastCallType = "gmail";
-						hostLog(logPrefix, "info", `Detected gmail search result, setting lastCallType to "gmail"`);
-					}
-				}
-				
-				const lastCallTypeHandle = ctx!.newString(lastCallType);
-				ctx!.setProp(ctx!.global, "__lastCallType__", lastCallTypeHandle);
-				lastCallTypeHandle.dispose();
-				
-				// CRITICAL FIX: Restore the actual checkpoint from VM state instead of creating empty one
-				hostLog(logPrefix, "info", `DEBUG: initialVmState exists: ${!!initialVmState}`);
-				if (initialVmState) {
-					hostLog(logPrefix, "info", `DEBUG: initialVmState keys: ${Object.keys(initialVmState)}`);
-					hostLog(logPrefix, "info", `DEBUG: initialVmState.checkpoint exists: ${!!(initialVmState as any).checkpoint}`);
-					if ((initialVmState as any).checkpoint) {
-						hostLog(logPrefix, "info", `DEBUG: checkpoint type: ${typeof (initialVmState as any).checkpoint}`);
-					}
-				}
-				
-				if (initialVmState && (initialVmState as any).checkpoint) {
-					try {
-						const checkpoint = (initialVmState as any).checkpoint;
-						hostLog(logPrefix, "info", `Restoring checkpoint from initialVmState.checkpoint`);
-						hostLog(logPrefix, "info", `Checkpoint data preview: ${JSON.stringify(checkpoint).substring(0, 200)}...`);
-						
-						// Create the checkpoint object in the VM context
-						const checkpointHandle = createHandleFromJson(ctx!, checkpoint, []);
-						ctx!.setProp(ctx!.global, "__checkpoint__", checkpointHandle);
-						checkpointHandle.dispose();
-						
-						hostLog(logPrefix, "info", `Successfully restored checkpoint from VM state`);
-					} catch (error) {
-						hostLog(logPrefix, "warn", `Failed to restore checkpoint from VM state: ${(error as Error).message}`);
-						// Fallback to empty checkpoint
-						const checkpointHandle = ctx!.newObject();
-						ctx!.setProp(checkpointHandle, "completed", ctx!.newObject());
-						ctx!.setProp(ctx!.global, "__checkpoint__", checkpointHandle);
-						checkpointHandle.dispose();
-						hostLog(logPrefix, "info", `Created empty checkpoint (fallback after restore failure)`);
-					}
-				} else {
-					// Set up empty checkpoint for new execution (only when no VM state)
-					const checkpointHandle = ctx!.newObject();
-					ctx!.setProp(checkpointHandle, "completed", ctx!.newObject());
-					ctx!.setProp(ctx!.global, "__checkpoint__", checkpointHandle);
-					checkpointHandle.dispose();
-					hostLog(logPrefix, "info", `Created empty checkpoint (new execution)`);
-				}
-				
-				// CRITICAL FIX: Also inject proper cache results for the service proxy
-				// This ensures that when the task tries to call the same service again, it gets the cached result
-				if (resumePayload && typeof resumePayload === 'object') {
-					if (resumePayload.domains) {
-						// Cache the domains.list result
-						const cacheKey = `gapi_admin_domains_list_${taskRunId}`;
-						const domainsResultHandle = createHandleFromJson(ctx!, resumePayload, []);
-						ctx!.setProp(ctx!.global, `__cache_${cacheKey}__`, domainsResultHandle);
-						domainsResultHandle.dispose();
-						hostLog(logPrefix, "info", `Cached domains.list result for key: ${cacheKey}`);
-					} else if (resumePayload.users) {
-						// Cache the users.list result
-						const cacheKey = `gapi_admin_directory_users_list_${taskRunId}`;
-						const usersResultHandle = createHandleFromJson(ctx!, resumePayload, []);
-						ctx!.setProp(ctx!.global, `__cache_${cacheKey}__`, usersResultHandle);
-						usersResultHandle.dispose();
-						hostLog(logPrefix, "info", `Cached directory.users.list result for key: ${cacheKey}`);
-						
-						// CRITICAL FIX: Also restore domains cache if task needs it 
-						// During users.list resumption, the domains cache might be needed by the task
-						if (initialVmState && (initialVmState as any).vm_state) {
-							try {
-								const vmState = typeof (initialVmState as any).vm_state === 'string' ? 
-									JSON.parse((initialVmState as any).vm_state) : (initialVmState as any).vm_state;
-								
-								// Look for domains cache in the checkpoint or VM state
-								const checkpoint = vmState.globalThis?.__checkpoint__;
-								if (checkpoint && checkpoint.domainsCache && checkpoint.domainsCache.domains) {
-									hostLog(logPrefix, "info", `Restoring domains cache from checkpoint during users resumption`);
-									const domainsCacheKey = `gapi_admin_domains_list_${taskRunId}`;
-									const domainsCacheHandle = createHandleFromJson(ctx!, checkpoint.domainsCache, []);
-									ctx!.setProp(ctx!.global, `__cache_${domainsCacheKey}__`, domainsCacheHandle);
-									domainsCacheHandle.dispose();
-									hostLog(logPrefix, "info", `Restored domains cache for key: ${domainsCacheKey}`);
-								}
-							} catch (error) {
-								hostLog(logPrefix, "warn", `Failed to restore domains cache during users resumption: ${(error as Error).message}`);
-							}
-						}
-					} else if (resumePayload.messages) {
-						// Cache the gmail messages result
-						const cacheKey = `gapi_gmail_users_messages_list_${taskRunId}`;
-						const messagesResultHandle = createHandleFromJson(ctx!, resumePayload, []);
-						ctx!.setProp(ctx!.global, `__cache_${cacheKey}__`, messagesResultHandle);
-						messagesResultHandle.dispose();
-						hostLog(logPrefix, "info", `Cached gmail.messages.list result for key: ${cacheKey}`);
-						
-						// CRITICAL FIX: Also restore domains and users caches during Gmail resumption
-						if (initialVmState && (initialVmState as any).vm_state) {
-							try {
-								const vmState = typeof (initialVmState as any).vm_state === 'string' ? 
-									JSON.parse((initialVmState as any).vm_state) : (initialVmState as any).vm_state;
-								
-								const checkpoint = vmState.globalThis?.__checkpoint__;
-								if (checkpoint) {
-									// Restore domains cache
-									if (checkpoint.domainsCache && checkpoint.domainsCache.domains) {
-										const domainsCacheKey = `gapi_admin_domains_list_${taskRunId}`;
-										const domainsCacheHandle = createHandleFromJson(ctx!, checkpoint.domainsCache, []);
-										ctx!.setProp(ctx!.global, `__cache_${domainsCacheKey}__`, domainsCacheHandle);
-										domainsCacheHandle.dispose();
-										hostLog(logPrefix, "info", `Restored domains cache during Gmail resumption`);
-									}
-									
-									// Restore users caches
-									if (checkpoint.usersCache) {
-										for (const [domainName, usersData] of Object.entries(checkpoint.usersCache)) {
-											const usersCacheKey = `gapi_admin_directory_users_list_${taskRunId}_${JSON.stringify([{domain: domainName}])}`;
-											const usersCacheHandle = createHandleFromJson(ctx!, {users: usersData}, []);
-											ctx!.setProp(ctx!.global, `__cache_${usersCacheKey}__`, usersCacheHandle);
-											usersCacheHandle.dispose();
-											hostLog(logPrefix, "info", `Restored users cache for domain: ${domainName}`);
-										}
-									}
-								}
-	} catch (error) {
-								hostLog(logPrefix, "warn", `Failed to restore caches during Gmail resumption: ${(error as Error).message}`);
-							}
-						}
-					}
-				}
-				
-				// Now execute the task normally - it should find the resume state and continue
-				const taskHandler = await evaluateTaskCode(ctx!, taskCode, logPrefix, false);
-				
+				// Now call the function just like in normal execution
 				const handles: QuickJSHandle[] = [];
 				const normalizedInput = taskInput || {};
 				const inputHandle = createHandleFromJson(ctx!, normalizedInput, handles);
@@ -833,7 +550,6 @@ async function executeQuickJS(
 				resultOrPromise = callResult.value;
 			} else {
 				// Fallback to normal execution if no resume payload
-				hostLog(logPrefix, "info", `No resume payload found, executing normally`);
 				const taskHandler = await evaluateTaskCode(ctx!, taskCode, logPrefix, false);
 				
 				const handles: QuickJSHandle[] = [];
@@ -902,30 +618,25 @@ async function executeQuickJS(
 			resultOrPromise = callResult.value;
 		}
 		
-		return await resolvePromiseAndSuspend(ctx!, resultOrPromise, ctx!.runtime, logPrefix, taskRunId, taskCode, taskName, taskInput);
+		return await resolvePromiseAndSuspend(ctx!, resultOrPromise, ctx!.runtime, logPrefix, taskRunId, taskCode, taskName, taskInput, stackRunId);
 
 	} catch (error) {
-		let errorMsg: string;
-		try {
-			errorMsg = error instanceof Error
-				? `${error.message}${error.stack ? '\n' + error.stack : ""}`
-				: String(error);
-		} catch (stringifyError) {
-			// If we can't even convert the error to string, there's a serious issue
-			errorMsg = "Error occurred but could not be stringified (possible object conversion issue)";
-		}
+		const errorMsg = error instanceof Error
+			? `${error.message}\\n${error.stack || ""}`
+			: String(error);
 		hostLog(logPrefix, "error", `Error in executeQuickJS for ${taskName}: ${errorMsg}`);
+		
+		// DEBUG: Check if this is a stackRunId error
+		if (errorMsg.includes("stackRunId is not defined")) {
+			hostLog(logPrefix, "error", `STACKRUNID DEBUG: providedStackRunId = ${providedStackRunId}, initialVmState.stackRunId = ${initialVmState?.stackRunId}`);
+			hostLog(logPrefix, "error", `STACKRUNID DEBUG: This error is likely coming from JavaScript execution inside the VM`);
+		}
+		
 		throw error;
 	} finally {
 		// CRITICAL: Always fully dispose of the QuickJS instance
-		try {
-			if (ctx) {
-				ctx.dispose();
-				hostLog(logPrefix, "info", `QuickJS instance for ${taskName} fully disposed.`);
-			}
-		} catch (disposeError) {
-			hostLog(logPrefix, "warn", `Error disposing QuickJS context: ${disposeError instanceof Error ? disposeError.message : String(disposeError)}`);
-		}
+		if (ctx) ctx.dispose();
+		hostLog(logPrefix, "info", `QuickJS instance for ${taskName} fully disposed.`);
 	}
 }
 
@@ -935,237 +646,120 @@ async function executeQuickJS(
  * or a suspension is triggered.
  */
 async function resolvePromiseAndSuspend(
-	ctx: QuickJSAsyncContext, 
+	ctx: QuickJSContext, 
 	initialPromiseHandle: QuickJSHandle,
 	quickJSInstance: QuickJSRuntime,
 	logPrefix: string,
 	taskRunId: string,
 	currentTaskCode: string,
 	currentTaskName: string,
-	currentTaskInput: any
+	currentTaskInput: any,
+	stackRunId: string
 ): Promise<any> {
 	let currentResultHandle = initialPromiseHandle;
 	let loopCount = 0;
-	const maxLoop = 200; 
-
-	const currentQjsStackRunIdHandle = ctx.getProp(ctx.global, "__currentStackRunId");
-	const currentQjsStackRunId = ctx.typeof(currentQjsStackRunIdHandle) === "string" ? ctx.getString(currentQjsStackRunIdHandle) : undefined;
-	currentQjsStackRunIdHandle?.dispose();
-
-	if (!currentQjsStackRunId) {
-		hostLog(logPrefix, "error", "CRITICAL: __currentStackRunId is not available in VM global scope for suspension.");
-		throw new Error("Missing __currentStackRunId, cannot correctly suspend VM.");
-	}
+	const maxLoop = 100; // Reduced from 1000 to catch issues faster
 
 	while (true) {
 		loopCount++;
 		if (loopCount > maxLoop) {
-			hostLog(logPrefix, "error", "Max loop count reached in resolvePromiseAndSuspend. Possible infinite loop or too many chained promises in VM.");
+			hostLog(logPrefix, "error", "Max loop count reached in resolvePromiseAndSuspend. Possible infinite loop in VM.");
+			// Debug: dump the current result type and value
 			const resultType = ctx.typeof(currentResultHandle);
-			let resultValue: any;
-			try {
-				resultValue = ctx.dump(currentResultHandle);
-			} catch (dumpError) {
-				resultValue = `[Dump failed: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}]`;
-			}
-			hostLog(logPrefix, "error", `Current result type: ${resultType}, value: ${simpleStringify(resultValue)}`);
-			throw new Error("VM execution timed out due to excessive pending jobs or deep promise chain.");
+			const resultValue = ctx.dump(currentResultHandle);
+			hostLog(logPrefix, "error", `Current result type: ${resultType}, value: ${JSON.stringify(resultValue)}`);
+			throw new Error("VM execution timed out due to excessive pending jobs.");
 		}
 
-		// Function to check for suspension markers - called after promise resolution
-		function checkForSuspension(resultHandle: QuickJSHandle) {
-			let suspended = false;
-			let childStackRunIdForHostCall: string | undefined; 
-			let serviceNameForHostCall: string | undefined;
-			let methodNameForHostCall: string | undefined;
-			let argsForHostCall: any[] | undefined;
+		// Check for suspension first
+		const suspendInfoHandle = ctx.getProp(ctx.global, "__suspendInfo__");
+		let suspended = false;
+		let stackRunIdToSuspend: string | undefined;
+		let serviceNameForSuspend: string | undefined;
 
-			// DEBUG: Log what we're checking
-			hostLog(logPrefix, "debug", `checkForSuspension: result type = ${ctx.typeof(resultHandle)}`);
-			
-			if (ctx.typeof(resultHandle) === "object") {
-				const vmSuspensionHandle = ctx.getProp(resultHandle, "__vmSuspension__");
-				const vmSuspensionValue = ctx.dump(vmSuspensionHandle);
-				hostLog(logPrefix, "debug", `checkForSuspension: __vmSuspension__ = ${vmSuspensionValue}`);
+		if (ctx.typeof(suspendInfoHandle) === "object") {
+			const suspendedHandle = ctx.getProp(suspendInfoHandle, "suspended");
+			if (ctx.dump(suspendedHandle) === true) {
+				suspended = true;
+				const stackRunIdHandle = ctx.getProp(suspendInfoHandle, "stackRunId");
+				stackRunIdToSuspend = ctx.getString(stackRunIdHandle);
+				stackRunIdHandle.dispose();
+
+				const serviceNameHandle = ctx.getProp(suspendInfoHandle, "serviceName");
+				serviceNameForSuspend = ctx.getString(serviceNameHandle); 
+				serviceNameHandle.dispose();
 				
-				if (vmSuspensionValue === true || vmSuspensionValue === "true") {
-					suspended = true;
-					const stackRunIdHandle = ctx.getProp(resultHandle, "stackRunId"); 
-					childStackRunIdForHostCall = ctx.getString(stackRunIdHandle);
-					stackRunIdHandle.dispose();
-
-					const pendingCallHandle = ctx.getProp(ctx.global, "__pendingServiceCall__");
-					if (ctx.typeof(pendingCallHandle) === "object") {
-						const pendingCall = ctx.dump(pendingCallHandle);
-						serviceNameForHostCall = pendingCall.service;
-						methodNameForHostCall = pendingCall.method;
-						argsForHostCall = pendingCall.args;
-						hostLog(logPrefix, "info", `VM suspension marker detected. Pending call: ${serviceNameForHostCall}.${methodNameForHostCall}, ChildStackRunID: ${childStackRunIdForHostCall}`);
-						ctx.setProp(ctx.global, "__pendingServiceCall__", ctx.undefined); 
-					}
-					pendingCallHandle?.dispose();
-				}
-				vmSuspensionHandle?.dispose();
+				hostLog(logPrefix, "info", `VM suspension requested for service: ${serviceNameForSuspend}, stackRunId: ${stackRunIdToSuspend}`); 
 			}
-
-			if (!suspended) {
-				const suspendInfoGlobalHandle = ctx.getProp(ctx.global, "__suspendInfo__");
-				if (ctx.typeof(suspendInfoGlobalHandle) === "object") {
-					const suspendedFlagHandle = ctx.getProp(suspendInfoGlobalHandle, "suspended");
-					if (ctx.dump(suspendedFlagHandle) === true) {
-						suspended = true;
-						const stackRunIdHandle = ctx.getProp(suspendInfoGlobalHandle, "stackRunId"); 
-						childStackRunIdForHostCall = ctx.getString(stackRunIdHandle);
-						stackRunIdHandle.dispose();
-
-						const serviceNameHandle = ctx.getProp(suspendInfoGlobalHandle, "serviceName");
-						serviceNameForHostCall = ctx.getString(serviceNameHandle); 
-						serviceNameHandle.dispose();
-
-						const methodHandle = ctx.getProp(suspendInfoGlobalHandle, "method");
-						methodNameForHostCall = ctx.getString(methodHandle);
-						methodHandle.dispose();
-
-						const argsHandle = ctx.getProp(suspendInfoGlobalHandle, "args");
-						argsForHostCall = ctx.dump(argsHandle);
-						argsHandle.dispose();
-						
-						hostLog(logPrefix, "info", `VM suspension via __suspendInfo__. Call: ${serviceNameForHostCall}.${methodNameForHostCall}, ChildStackRunID: ${childStackRunIdForHostCall}`);
-						ctx.setProp(ctx.global, "__suspendInfo__", ctx.undefined); 
-					}
-					suspendedFlagHandle?.dispose();
-				}
-				suspendInfoGlobalHandle?.dispose();
-			}
-
-			return { suspended, childStackRunIdForHostCall, serviceNameForHostCall, methodNameForHostCall, argsForHostCall };
+			suspendedHandle?.dispose();
 		}
+		suspendInfoHandle?.dispose();
 
-		// CRITICAL FIX: Check for suspension markers FIRST, before promise detection
-		// This prevents suspension markers from being incorrectly processed as promises
-		const prePromiseCheckSuspension = checkForSuspension(currentResultHandle);
-		if (prePromiseCheckSuspension.suspended && prePromiseCheckSuspension.childStackRunIdForHostCall && prePromiseCheckSuspension.serviceNameForHostCall && prePromiseCheckSuspension.methodNameForHostCall && prePromiseCheckSuspension.argsForHostCall) {
-			hostLog(logPrefix, "info", `🚨 PRE-PROMISE SUSPENSION DETECTED for ${prePromiseCheckSuspension.serviceNameForHostCall}.${prePromiseCheckSuspension.methodNameForHostCall}`);
-			
-			// Save suspension immediately - identical to non-promise suspension path
-			const parentOfCurrentQjsRunHandle = ctx.getProp(ctx.global, "__parentStackRunId__");
-			const parentOfCurrentQjsRun = ctx.typeof(parentOfCurrentQjsRunHandle) === 'string' ? ctx.getString(parentOfCurrentQjsRunHandle) : undefined;
-			parentOfCurrentQjsRunHandle?.dispose();
-
-			const capturedVmState: SerializedVMState = captureVMState(
-				ctx, 
-				taskRunId,
-				prePromiseCheckSuspension.childStackRunIdForHostCall,
-				currentTaskCode,
-				currentTaskName,
-				currentTaskInput
-			);
-
-			await saveStackRun(
-				prePromiseCheckSuspension.serviceNameForHostCall,
-				prePromiseCheckSuspension.methodNameForHostCall,
-				prePromiseCheckSuspension.argsForHostCall,
-				capturedVmState,
-				taskRunId,
-				currentQjsStackRunId
-			);
-
-			await updateStackRun( 
-				currentQjsStackRunId,
-				'suspended_waiting_child',
-				undefined,
-				undefined,
-				capturedVmState
-			);
-
-			hostLog(logPrefix, "info", `✅ Pre-promise suspension complete. VM state saved.`);
-
-			if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
+		if (suspended && stackRunIdToSuspend) {
+			if (currentResultHandle !== initialPromiseHandle) {
 				currentResultHandle.dispose();
 			}
 			
-			return { 
+			// Create the stack run for the suspended operation
+			const suspendInfoHandle = ctx.getProp(ctx.global, "__suspendInfo__");
+			if (ctx.typeof(suspendInfoHandle) === "object") {
+				const methodHandle = ctx.getProp(suspendInfoHandle, "method");
+				const argsHandle = ctx.getProp(suspendInfoHandle, "args");
+				
+				const method = ctx.getString(methodHandle);
+				const args = ctx.dump(argsHandle);
+				
+				methodHandle.dispose();
+				argsHandle.dispose();
+				
+				// Create the stack run asynchronously (don't await to avoid blocking)
+				const suspendVmState = captureVMState(
+					ctx,
+					taskRunId,
+					stackRunIdToSuspend,
+					undefined, // taskCode
+					undefined, // taskName
+					undefined, // taskInput
+					stackRunId
+				);
+				
+				saveStackRun(
+					serviceNameForSuspend || "unknown",
+					method,
+					args || [],
+					suspendVmState,
+					taskRunId,
+					stackRunId
+				).then(() => {
+					hostLog(logPrefix, "info", `Stack run ${stackRunIdToSuspend} created for ${serviceNameForSuspend}.${method}`);
+				}).catch(error => {
+					hostLog(logPrefix, "error", `Failed to create stack run: ${error instanceof Error ? error.message : String(error)}`);
+				});
+			}
+			suspendInfoHandle?.dispose();
+			
+			// Clear the suspend info after processing
+			ctx.setProp(ctx.global, "__suspendInfo__", ctx.undefined);
+			
+			return {
 				__hostCallSuspended: true,
-				taskRunId: taskRunId, 
-				stackRunId: prePromiseCheckSuspension.childStackRunIdForHostCall, 
-				serviceName: prePromiseCheckSuspension.serviceNameForHostCall,
-				message: `VM suspended for service call to ${prePromiseCheckSuspension.serviceNameForHostCall}. Child StackRunID: ${prePromiseCheckSuspension.childStackRunIdForHostCall}`
+				taskRunId: taskRunId,
+				stackRunId: stackRunIdToSuspend,
+				serviceName: serviceNameForSuspend || "unknown",
+				message: `VM suspended for service call to ${serviceNameForSuspend}. StackRunID: ${stackRunIdToSuspend}`
 			};
 		}
 
+		// Check if result is a promise
 		const isResultPromise = isPromise(ctx, currentResultHandle);
-		hostLog(logPrefix, "debug", `Loop ${loopCount}: Result type: ${ctx.typeof(currentResultHandle)}, isPromise: ${isResultPromise}`);
-
-		// Check for non-promise results or immediate suspension markers
-		if (!isResultPromise) {
-			// Check for immediate suspension in non-promise results
-			const immediateSuspensionResult = checkForSuspension(currentResultHandle);
-			if (immediateSuspensionResult.suspended && immediateSuspensionResult.childStackRunIdForHostCall && immediateSuspensionResult.serviceNameForHostCall && immediateSuspensionResult.methodNameForHostCall && immediateSuspensionResult.argsForHostCall) {
-				hostLog(logPrefix, "info", `🚨 IMMEDIATE SUSPENSION DETECTED for ${immediateSuspensionResult.serviceNameForHostCall}.${immediateSuspensionResult.methodNameForHostCall}. Child StackRunID: ${immediateSuspensionResult.childStackRunIdForHostCall}`);
-
-				const parentOfCurrentQjsRunHandle = ctx.getProp(ctx.global, "__parentStackRunId__");
-				const parentOfCurrentQjsRun = ctx.typeof(parentOfCurrentQjsRunHandle) === 'string' ? ctx.getString(parentOfCurrentQjsRunHandle) : undefined;
-				parentOfCurrentQjsRunHandle?.dispose();
-
-				const capturedVmState: SerializedVMState = captureVMState(
-					ctx, 
-					taskRunId, 
-					immediateSuspensionResult.childStackRunIdForHostCall, 
-					currentTaskCode,    
-					currentTaskName,    
-					currentTaskInput,   
-					parentOfCurrentQjsRun 
-				);
-				hostLog(logPrefix, "info", `✅ VM state captured for current stack run ${currentQjsStackRunId}. Waiting on ${immediateSuspensionResult.childStackRunIdForHostCall}.`);
-
-				// Save the ephemeral call and update the parent stack run
-				await __saveEphemeralCall__(
-					immediateSuspensionResult.childStackRunIdForHostCall, 
-					immediateSuspensionResult.serviceNameForHostCall,
-					immediateSuspensionResult.methodNameForHostCall,
-					immediateSuspensionResult.argsForHostCall,
-					taskRunId,          
-					currentQjsStackRunId,
-					currentTaskCode,
-					currentTaskName
-				);
-				hostLog(logPrefix, "info", `✅ Child stack_run ${immediateSuspensionResult.childStackRunIdForHostCall} created for host call. Parent ${currentQjsStackRunId} status updated.`);
-
-				// Explicitly persist the captured VM state for the current (now suspending) QJS stack_run
-				await updateStackRun( 
-					currentQjsStackRunId,
-					'suspended_waiting_child',
-					undefined,                 // no result for the parent at this point
-					undefined,                 // no error for the parent at this point
-					capturedVmState            // Persist the full VM state as resumePayload
-				);
-				hostLog(logPrefix, "info", `✅ VM state for parent QJS stack_run ${currentQjsStackRunId} explicitly persisted for suspension.`);
-
-				if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
-					currentResultHandle.dispose();
-				}
-				
-				hostLog(logPrefix, "info", `🔄 VM SUSPENDING - PROCESS WILL NOW TERMINATE for host call to ${immediateSuspensionResult.serviceNameForHostCall}.${immediateSuspensionResult.methodNameForHostCall}`);
-				
-				return { 
-					__hostCallSuspended: true,
-					taskRunId: taskRunId, 
-					stackRunId: immediateSuspensionResult.childStackRunIdForHostCall, 
-					serviceName: immediateSuspensionResult.serviceNameForHostCall,
-					message: `VM suspended for service call to ${immediateSuspensionResult.serviceNameForHostCall}. Child StackRunID: ${immediateSuspensionResult.childStackRunIdForHostCall}`
-				};
-			}
-		}
+		hostLog(logPrefix, "info", `Loop ${loopCount}: Result type: ${ctx.typeof(currentResultHandle)}, isPromise: ${isResultPromise}`);
 
 		if (isResultPromise) {
-			// Promise detected - await it normally
-			hostLog(logPrefix, "debug", `Awaiting promise (loop ${loopCount})`);
-			
-			
+			hostLog(logPrefix, "info", `Awaiting promise (loop ${loopCount})`);
 			try {
 				const promiseSettledResult = await ctx.resolvePromise(currentResultHandle);
 				
-				if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
+				if (currentResultHandle !== initialPromiseHandle) {
 					currentResultHandle.dispose();
 				}
 
@@ -1175,164 +769,73 @@ async function resolvePromiseAndSuspend(
 					promiseSettledResult.error.dispose();
 					throw err;
 				}
-				currentResultHandle = promiseSettledResult.value; 
-				
-				// Check for suspension after promise resolution
-				hostLog(logPrefix, "debug", `Checking for suspension after promise resolution, result type: ${ctx.typeof(currentResultHandle)}`);
-				const postResolveSuspensionResult = checkForSuspension(currentResultHandle);
-				hostLog(logPrefix, "debug", `Suspension check result: suspended=${postResolveSuspensionResult.suspended}, childStackRunId=${postResolveSuspensionResult.childStackRunIdForHostCall}`);
-				
-				if (postResolveSuspensionResult.suspended && postResolveSuspensionResult.childStackRunIdForHostCall && postResolveSuspensionResult.serviceNameForHostCall && postResolveSuspensionResult.methodNameForHostCall && postResolveSuspensionResult.argsForHostCall) {
-					hostLog(logPrefix, "info", `🎉 SUSPENSION DETECTED! VM suspending after promise resolution for service call to ${postResolveSuspensionResult.serviceNameForHostCall}.${postResolveSuspensionResult.methodNameForHostCall}. Child StackRunID: ${postResolveSuspensionResult.childStackRunIdForHostCall}`);
-
-					const parentOfCurrentQjsRunHandle = ctx.getProp(ctx.global, "__parentStackRunId__");
-					const parentOfCurrentQjsRun = ctx.typeof(parentOfCurrentQjsRunHandle) === 'string' ? ctx.getString(parentOfCurrentQjsRunHandle) : undefined;
-					parentOfCurrentQjsRunHandle?.dispose();
-
-					const callingVmState: SerializedVMState = captureVMState(
-						ctx, 
-						taskRunId,
-						postResolveSuspensionResult.childStackRunIdForHostCall,
-						currentTaskCode,
-						currentTaskName,
-						currentTaskInput
-					);
-
-					await saveStackRun(
-						postResolveSuspensionResult.serviceNameForHostCall,
-						postResolveSuspensionResult.methodNameForHostCall,
-						postResolveSuspensionResult.argsForHostCall,
-						callingVmState,
-						taskRunId,
-						currentQjsStackRunId
-					);
-
-					hostLog(logPrefix, "info", `VM state for parent QJS stack_run ${currentQjsStackRunId} explicitly persisted for suspension.`);
-
-					if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
-						currentResultHandle.dispose();
-					}
-					
-					return { 
-						__hostCallSuspended: true,
-						taskRunId: taskRunId, 
-						stackRunId: postResolveSuspensionResult.childStackRunIdForHostCall, 
-						serviceName: postResolveSuspensionResult.serviceNameForHostCall,
-						message: `VM suspended for service call to ${postResolveSuspensionResult.serviceNameForHostCall}. Child StackRunID: ${postResolveSuspensionResult.childStackRunIdForHostCall}`
-					};
-				}
-			} catch (e) {
-				hostLog(logPrefix, "error", `Error during ctx.resolvePromise: ${e instanceof Error ? e.message : String(e)}`);
-				throw e;
+				currentResultHandle = promiseSettledResult.value;
+			} catch (error) {
+				hostLog(logPrefix, "error", `Error resolving promise: ${error instanceof Error ? error.message : String(error)}`);
+				throw error;
 			}
 		} else {
-			hostLog(logPrefix, "info", `Execution complete. Final result type: ${ctx.typeof(currentResultHandle)}.`);
-			const finalResult = ctx.dump(currentResultHandle);
-			if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
+			// Not a promise, this is our final result
+			hostLog(logPrefix, "info", `Promise resolved to a final value (loop ${loopCount})`);
+			const finalJsValue = ctx.dump(currentResultHandle);
+			if (currentResultHandle !== initialPromiseHandle) {
 				currentResultHandle.dispose();
 			}
-			return finalResult; 
+			return finalJsValue;
 		}
 
-		hostLog(logPrefix, "debug", `Executing pending jobs in QuickJS runtime (loop ${loopCount}).`);
-		const executedJobsResult = quickJSInstance.executePendingJobs();
-		if (executedJobsResult.error) {
-			hostLog(logPrefix, "error", "Error while executing pending jobs in VM.");
-			const err = extractErrorFromHandle(ctx, executedJobsResult.error);
-			executedJobsResult.error.dispose();
-			throw err;
+		// Execute pending jobs
+		let executedJobs = 0;
+		const maxJobs = 50; // Reduced from 100
+		let jobResult = quickJSInstance.executePendingJobs();
+		while (jobResult.error === undefined && executedJobs < maxJobs) {
+			executedJobs++;
+			jobResult = quickJSInstance.executePendingJobs();
 		}
-
-		// CRITICAL FIX: Check for immediate suspension after job execution
-		// The __pendingServiceCall__ flag is set synchronously by service proxies
-		// and should cause immediate suspension, not wait for promise resolution
-		const pendingCallHandle = ctx.getProp(ctx.global, "__pendingServiceCall__");
-		if (ctx.typeof(pendingCallHandle) === "object") {
-			const pendingCall = ctx.dump(pendingCallHandle);
-			if (pendingCall && pendingCall.stackRunId && pendingCall.service && pendingCall.method && pendingCall.args) {
-				hostLog(logPrefix, "info", `IMMEDIATE SUSPENSION: __pendingServiceCall__ detected for ${pendingCall.service}.${pendingCall.method}. StackRunID: ${pendingCall.stackRunId}`);
-				
-				// Clear the pending call flag
-				ctx.setProp(ctx.global, "__pendingServiceCall__", ctx.undefined);
-				pendingCallHandle?.dispose();
-
-				// Capture VM state for suspension
-				const parentOfCurrentQjsRunHandle = ctx.getProp(ctx.global, "__parentStackRunId__");
-				const parentOfCurrentQjsRun = ctx.typeof(parentOfCurrentQjsRunHandle) === 'string' ? ctx.getString(parentOfCurrentQjsRunHandle) : undefined;
-				parentOfCurrentQjsRunHandle?.dispose();
-
-				const callingVmState: SerializedVMState = captureVMState(
-					ctx, 
-					taskRunId,
-					pendingCall.stackRunId,
-					currentTaskCode,
-					currentTaskName,
-					currentTaskInput
-				);
-
-				// Save the stack run for the service call
-				await saveStackRun(
-					pendingCall.service,
-					pendingCall.method,
-					pendingCall.args,
-					callingVmState,
-					taskRunId,
-					currentQjsStackRunId
-				);
-
-				hostLog(logPrefix, "info", `VM state for parent QJS stack_run ${currentQjsStackRunId} saved for immediate suspension.`);
-
-				// Clean up current result handle before returning
-				if (currentResultHandle && currentResultHandle !== initialPromiseHandle) {
-					currentResultHandle.dispose();
-				}
-				
-				// Return suspension marker
-				return { 
-					__hostCallSuspended: true,
-					taskRunId: taskRunId, 
-					stackRunId: pendingCall.stackRunId, 
-					serviceName: pendingCall.service,
-					message: `VM immediately suspended for service call to ${pendingCall.service}.${pendingCall.method}. Child StackRunID: ${pendingCall.stackRunId}`
-				};
-			}
+		
+		if (jobResult.error) {
+			hostLog(logPrefix, "error", `Error executing pending jobs: ${ctx.dump(jobResult.error)}`);
+			jobResult.error.dispose();
+			throw new Error("Error executing pending jobs in QuickJS");
 		}
-		pendingCallHandle?.dispose();
+		
+		if (executedJobs >= maxJobs) {
+			hostLog(logPrefix, "warn", `Executed maximum number of jobs (${maxJobs}) in loop ${loopCount}`);
+		} else if (executedJobs === 0) {
+			hostLog(logPrefix, "info", `No pending jobs to execute in loop ${loopCount}`);
+		} else {
+			hostLog(logPrefix, "info", `Executed ${executedJobs} pending jobs in loop ${loopCount}`);
+		}
 	}
 }
 
 // Function to check if a handle is a promise
-function isPromise(ctx: QuickJSAsyncContext, handle: QuickJSHandle): boolean {
+function isPromise(ctx: QuickJSContext, handle: QuickJSHandle): boolean {
 	if (!handle || ctx.typeof(handle) !== "object") {
 		return false;
 	}
 	
 	try {
-		// First, check if this object was created by the Promise constructor
-		const constructorProp = ctx.getProp(handle, "constructor");
-		if (constructorProp && ctx.typeof(constructorProp) === "function") {
-			const nameProp = ctx.getProp(constructorProp, "name");
-			const constructorName = ctx.typeof(nameProp) === "string" ? ctx.getString(nameProp) : "";
-			
-			nameProp?.dispose();
-			constructorProp.dispose();
-			
-			// If constructor name is Promise, it's definitely a promise
-			if (constructorName === "Promise") {
-				return true;
+		const thenProp = ctx.getProp(handle, "then");
+		const isFn = ctx.typeof(thenProp) === "function";
+		thenProp?.dispose();
+		
+		// Additional check for constructor name
+		if (isFn) {
+			const constructorProp = ctx.getProp(handle, "constructor");
+			if (constructorProp && ctx.typeof(constructorProp) === "function") {
+				const nameProp = ctx.getProp(constructorProp, "name");
+				const constructorName = ctx.typeof(nameProp) === "string" ? ctx.getString(nameProp) : "";
+				nameProp?.dispose();
+				constructorProp.dispose();
+				
+				// If it has a 'then' method and constructor name is Promise, it's definitely a promise
+				return constructorName === "Promise" || isFn;
 			}
-			
-			// If constructor name is Object, it's definitely not a promise (plain object)
-			if (constructorName === "Object") {
-				return false;
-			}
-			
-			// Unknown constructor name - return false for safety
-			return false;
-		} else {
 			constructorProp?.dispose();
-			return false;
 		}
+		
+		return isFn;
 	} catch (error) {
 		// If we can't check, assume it's not a promise
 		return false;
@@ -1343,8 +846,8 @@ function isPromise(ctx: QuickJSAsyncContext, handle: QuickJSHandle): boolean {
  * Evaluate task code and get the handler function
  */
 async function evaluateTaskCode(
-	ctx: QuickJSAsyncContext, 
-	taskCode: string,
+	ctx: QuickJSContext, 
+	taskCode: string, 
 	logPrefix: string,
 	defineOnly: boolean
 ): Promise<QuickJSHandle> {
@@ -1375,12 +878,7 @@ async function evaluateTaskCode(
 	const evalResult = ctx.evalCode(codeToRun);
 
 	if (evalResult.error) {
-		let errMsg: any;
-		try {
-			errMsg = ctx.dump(evalResult.error);
-		} catch (dumpError) {
-			errMsg = `[Error dump failed: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}]`;
-		}
+		const errMsg = ctx.dump(evalResult.error);
 		hostLog(logPrefix, "error", `Error evaluating task code: ${simpleStringify(errMsg)}`);
 		const originalError = extractErrorFromHandle(ctx, evalResult.error);
 		evalResult.error.dispose();
@@ -1451,27 +949,16 @@ async function resumeVM(
 
 	const { taskCode, taskName, taskInput, taskRunId: parentTaskRunId, stackRunId: suspensionPointStackRunId } = stackRunToResume.vm_state;
 	
-	// FIX: Set suspended to false when resuming, and properly inject the result
 	const resumeState: SerializedVMState = {
 		...stackRunToResume.vm_state,
-		suspended: false, // FIX: We're resuming, not suspending
+							suspended: true, 
 		waitingOnStackRunId: stackRunToResume.waiting_on_stack_run_id || stackRunToResume.id,
 		resume_payload: childResult,
-		last_call_result: childResult, // FIX: Also set this for backward compatibility
-		// Add checkpoint data to properly cache the result
-		checkpoint: {
-			...stackRunToResume.vm_state.checkpoint,
-			completed: {
-				...stackRunToResume.vm_state.checkpoint?.completed,
-				[suspensionPointStackRunId || stackRunToResume.id]: childResult
-			}
-		}
 	};
 	
 	hostLog(logPrefix, "info", `Resuming task ${taskName} (runId: ${parentTaskRunId}) using its state from stack_run ${suspensionPointStackRunId}, it was waiting on ${resumeState.waitingOnStackRunId}`);
-	hostLog(logPrefix, "info", `Resume payload:`, JSON.stringify(childResult).substring(0, 200));
 	
-	return executeQuickJS(taskCode, taskName, taskInput, parentTaskRunId, undefined, resumeState);
+	return executeQuickJS(taskCode, taskName, taskInput, parentTaskRunId, undefined, resumeState, suspensionPointStackRunId);
 }
 
 // ==============================
@@ -1504,17 +991,8 @@ async function handleRequest(req: Request): Promise<Response> {
  */
 export async function handleResumeRequest(req: Request): Promise<Response> {
 	const logPrefix = "QuickJS-HandleResume";
-	let requestData: any;
-	
-	try {
-		// FIX: Ensure we only read the request body once
-		try {
-			requestData = await req.json();
-		} catch (bodyError) {
-			hostLog(logPrefix, "error", `Error reading request body: ${bodyError instanceof Error ? bodyError.message : String(bodyError)}`);
-			return handleError(new Error("Invalid JSON in request body"), "Cannot parse request", 400, logPrefix);
-		}
-		
+  try {
+    const requestData = await req.json();
 		const { stackRunIdToResume, resultToInject } = requestData;
 
 		if (!stackRunIdToResume) {
@@ -1532,8 +1010,6 @@ export async function handleResumeRequest(req: Request): Promise<Response> {
 		if (!stackRun.waiting_on_stack_run_id && stackRun.status !== 'pending_resume') {
 			hostLog(logPrefix, "warn", `Stack run ${stackRunIdToResume} status is ${stackRun.status} and not explicitly waiting_on_stack_run_id. Resuming anyway if vm_state present.`);
 		}
-		
-		hostLog(logPrefix, "info", `Resuming VM with result:`, JSON.stringify(resultToInject).substring(0, 200));
 		
 		const finalResult = await resumeVM(stackRun, resultToInject);
 
@@ -1566,8 +1042,24 @@ export async function handleResumeRequest(req: Request): Promise<Response> {
 async function handleExecuteRequest(req: Request): Promise<Response> {
 	const logPrefix = "QuickJS-HandleExecute";
   try {
+    // Handle GET requests for health checks
+    if (req.method === 'GET') {
+      return new Response(JSON.stringify({
+        status: 'healthy',
+        service: 'QuickJS Runtime',
+        version: '1.0.0'
+      }), { 
+        status: 200, 
+        headers: { ...corsHeaders, "Content-Type": "application/json" } 
+      });
+    }
+    
     const requestData = await req.json();
 		const { taskCode, taskName, taskInput, taskRunId, stackRunId, toolNames, initialVmState } = requestData;
+
+		// DEBUG: Log what we received
+		hostLog(logPrefix, "info", `Received request data: ${JSON.stringify(requestData)}`);
+		hostLog(logPrefix, "info", `stackRunId received: ${stackRunId}`);
 
 		if (!taskCode || !taskName) {
 			return handleError(new Error("Missing taskCode or taskName"), "Invalid execute request", 400, logPrefix);
