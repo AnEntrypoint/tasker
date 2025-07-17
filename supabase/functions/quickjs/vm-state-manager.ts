@@ -10,8 +10,8 @@ import {
 	QuickJSContext,
 	QuickJSRuntime,
 	QuickJSHandle
-} from "quickjs-emscripten";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.7";
+} from "npm:quickjs-emscripten@0.20.0";
+import { createClient } from "npm:@supabase/supabase-js@2.39.3";
 import { hostLog } from "../_shared/utils.ts";
 
 // ==============================
@@ -87,7 +87,7 @@ export function _generateUUID(): string {
 }
 
 /**
- * Get a Supabase client instance with service role
+ * Get a direct Supabase client instance (vm-state-manager needs direct access for QuickJS functionality)
  */
 export function getSupabaseClient() {
   const { url, serviceRoleKey } = getSupabaseConfig();
@@ -95,6 +95,8 @@ export function getSupabaseClient() {
     hostLog("VM-State-Manager", "error", "Supabase URL or Service Key is missing. Cannot create client.");
     return null;
   }
+  
+  // Use direct Supabase client for vm-state-manager (critical for QuickJS functionality)
   return createClient(url, serviceRoleKey);
 }
 
@@ -419,7 +421,7 @@ export async function updateTaskRun(
  * Captures VM state information to be serialized and stored
  */
 export function captureVMState(
-  ctx: any,
+  _ctx: any,
   taskRunId: string | undefined, 
   waitingOnStackRunId: string | undefined,
   taskCode?: string,
@@ -431,69 +433,6 @@ export function captureVMState(
   
   const suspensionPointStackRunId = _generateUUID();
   
-  let checkpoint: any = {};
-  try {
-    if (ctx && typeof ctx.getProp === 'function' && typeof ctx.dump === 'function') {
-      const checkpointHandle = ctx.getProp(ctx.global, "__checkpoint__");
-      if (checkpointHandle && ctx.typeof(checkpointHandle) === 'object') {
-        // Attempt to dump the checkpoint with error handling for large objects
-        try {
-          checkpoint = ctx.dump(checkpointHandle);
-          
-          // Check if checkpoint is too large and trim if necessary
-          const checkpointString = JSON.stringify(checkpoint);
-          if (checkpointString.length > 1000000) { // 1MB limit
-            hostLog("VM-State-Manager", "warn", `Checkpoint too large (${checkpointString.length} chars), trimming caches`);
-            
-            // Keep only essential state, trim large caches
-            checkpoint = {
-              stage: checkpoint.stage || 'domains',
-              currentDomainIndex: checkpoint.currentDomainIndex || 0,
-              currentUserIndex: checkpoint.currentUserIndex || 0,
-              // Keep only summary info for caches to reduce size
-              domainsCache: checkpoint.domainsCache ? {
-                domains: checkpoint.domainsCache.domains ? 
-                  checkpoint.domainsCache.domains.map((d: any) => ({
-                    domainName: d.domainName,
-                    isPrimary: d.isPrimary,
-                    verified: d.verified
-                  })) : []
-              } : null,
-              usersCache: {}, // Reset users cache to prevent bloat
-              gmailCache: {}  // Reset gmail cache to prevent bloat
-            };
-            hostLog("VM-State-Manager", "info", `Checkpoint trimmed, new size: ${JSON.stringify(checkpoint).length} chars`);
-          }
-          
-          hostLog("VM-State-Manager", "info", `Captured checkpoint with stage: ${checkpoint.stage}`);
-        } catch (dumpError) {
-          hostLog("VM-State-Manager", "error", `Failed to dump checkpoint, using fallback: ${(dumpError as Error).message}`);
-          // Fallback to minimal checkpoint
-          checkpoint = {
-            stage: 'domains',
-            currentDomainIndex: 0,
-            currentUserIndex: 0,
-            domainsCache: null,
-            usersCache: {},
-            gmailCache: {}
-          };
-        }
-      }
-      checkpointHandle?.dispose();
-    }
-  } catch (error) {
-    hostLog("VM-State-Manager", "warn", `Error capturing checkpoint: ${(error as Error).message}`);
-    // Ensure we always have a valid checkpoint
-    checkpoint = {
-      stage: 'domains',
-      currentDomainIndex: 0,
-      currentUserIndex: 0,
-      domainsCache: null,
-      usersCache: {},
-      gmailCache: {}
-    };
-  }
-  
   return {
     stackRunId: suspensionPointStackRunId,
     taskRunId: taskRunId || _generateUUID(),
@@ -503,8 +442,7 @@ export function captureVMState(
     taskCode: taskCode || "",
     taskName: taskName || "",
     taskInput: taskInput || {},
-    parentStackRunId: parentStackRunId,
-    checkpoint: checkpoint
+    parentStackRunId: parentStackRunId
   };
 }
 
@@ -530,70 +468,20 @@ export async function prepareStackRunResumption(
       return false;
     }
 
-    // CRITICAL FIX: Preserve the existing checkpoint structure and merge with new result
-    const existingCheckpoint = parentStackRun.vm_state.checkpoint || {};
-    
-    // Determine what type of result we're getting and update checkpoint accordingly
-    let updatedCheckpoint = { ...existingCheckpoint };
-    
-    if (childResult && typeof childResult === 'object') {
-      if (childResult.domains) {
-        // This is a domains.list result
-        updatedCheckpoint.domainsCache = childResult;
-        updatedCheckpoint.stage = 'users';
-        updatedCheckpoint.currentDomainIndex = 0;
-        hostLog("VM-State-Manager", "info", `Updated checkpoint with domains data, moving to users stage`);
-      } else if (childResult.users) {
-        // This is a users.list result - preserve domains cache and cache the users data
-        if (existingCheckpoint.domainsCache) {
-          updatedCheckpoint.domainsCache = existingCheckpoint.domainsCache;
-        }
-        if (!updatedCheckpoint.usersCache) {
-          updatedCheckpoint.usersCache = {};
-        }
-        
-        // CRITICAL FIX: Actually cache the users data in the checkpoint
-        // We need to determine which domain this users.list call was for
-        // The users data should be cached based on the current domain being processed
-        if (existingCheckpoint.domainsCache && existingCheckpoint.domainsCache.domains) {
-          const currentDomainIndex = existingCheckpoint.currentDomainIndex || 0;
-          const currentDomain = existingCheckpoint.domainsCache.domains[currentDomainIndex];
-          
-          if (currentDomain && currentDomain.domainName) {
-            updatedCheckpoint.usersCache[currentDomain.domainName] = childResult.users;
-            hostLog("VM-State-Manager", "info", `Cached ${childResult.users.length} users for domain: ${currentDomain.domainName}`);
-          } else {
-            hostLog("VM-State-Manager", "warn", `Could not determine domain for users caching, currentDomainIndex: ${currentDomainIndex}`);
-          }
-        }
-        
-        updatedCheckpoint.stage = 'gmail';
-        updatedCheckpoint.currentUserIndex = 0;
-        hostLog("VM-State-Manager", "info", `Updated checkpoint with users data and preserved domains cache`);
-      } else if (childResult.messages) {
-        // This is a gmail search result - preserve all previous cache
-        if (existingCheckpoint.domainsCache) {
-          updatedCheckpoint.domainsCache = existingCheckpoint.domainsCache;
-        }
-        if (existingCheckpoint.usersCache) {
-          updatedCheckpoint.usersCache = existingCheckpoint.usersCache;
-        }
-        if (!updatedCheckpoint.gmailCache) {
-          updatedCheckpoint.gmailCache = {};
-        }
-        // Let the task handle Gmail caching logic
-        hostLog("VM-State-Manager", "info", `Updated checkpoint with Gmail data, preserving all caches`);
-      }
-    }
-
-    // Update the VM state with the resume payload and preserved checkpoint
+    // Update the VM state with the resume payload
     const updatedVmState: SerializedVMState = {
       ...parentStackRun.vm_state,
       last_call_result: childResult,
       resume_payload: childResult,
       suspended: true,
       waitingOnStackRunId: childStackRunId,
-      checkpoint: updatedCheckpoint
+      checkpoint: {
+        ...parentStackRun.vm_state.checkpoint,
+        completedServiceCall: {
+          stackRunId: childStackRunId,
+          result: childResult
+        }
+      }
     };
 
     // Update the parent stack run with the new VM state and mark it as ready to resume

@@ -21,212 +21,127 @@ const corsHeaders = {
  * This provides a simple key-value store backed by Supabase
  */
 class KeystoreService {
-  private supabase: any;
+  private wrappedSupabaseUrl: string;
+  private serviceRoleKey: string;
 
   constructor() {
-    const extSupabaseUrl = Deno.env.get("EXT_SUPABASE_URL") || "";
-    const serviceRoleKey = Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "";
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") || 'http://127.0.0.1:8080';
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     
-    if (!extSupabaseUrl) {
-      console.warn("[KeystoreService Constructor] EXT_SUPABASE_URL env var not set. Defaulting Supabase proxy target to internal Kong URL.");
-    }
     if (!serviceRoleKey) {
       console.error("[KeystoreService Constructor] FATAL: SUPABASE_SERVICE_ROLE_KEY environment variable is required.");
       throw new Error("SUPABASE_SERVICE_ROLE_KEY environment variable is required");
     }
 
-    // Determine the correct baseUrl for wrappedsupabase
-    let useKong = false;
-    if (extSupabaseUrl.includes('localhost') || extSupabaseUrl.includes('127.0.0.1') || !extSupabaseUrl) {
-        // If EXT_SUPABASE_URL looks like local dev OR if it's missing entirely, use kong.
-        console.log("[KeystoreService Constructor] Detected local environment, targeting internal Kong URL for wrappedsupabase proxy.");
-        useKong = true;
-    } else {
-        console.log(`[KeystoreService Constructor] Using provided EXT_SUPABASE_URL for wrappedsupabase proxy: ${extSupabaseUrl}`);
-    }
+    // Use wrappedsupabase proxy as the only way to access Supabase
+    const wrappedSupabaseUrl = `${supabaseUrl}/functions/v1/wrappedsupabase`;
+    console.log(`[KeystoreService Constructor] Connecting to wrappedsupabase: ${wrappedSupabaseUrl}`);
     
-    // In local development, try 3 different approaches to connect to wrappedsupabase:
-    // 1. Kong URL for Docker networking
-    // 2. Localhost URL for direct access
-    // 3. SUPABASE_URL env var as fallback
-    const kongUrl = 'http://kong:8000/functions/v1/wrappedsupabase';
-    const localhostUrl = 'http://127.0.0.1:8000/functions/v1/wrappedsupabase';
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseWrappedUrl = supabaseUrl ? `${supabaseUrl}/functions/v1/wrappedsupabase` : null;
+    // Create a simple HTTP client for wrappedsupabase instead of SDK proxy
+    this.wrappedSupabaseUrl = wrappedSupabaseUrl;
+    this.serviceRoleKey = serviceRoleKey;
     
-    // Default to Kong in local development, but we'll test connection and fallback if needed
-    let baseUrl = useKong ? kongUrl : `${extSupabaseUrl}/functions/v1/wrappedsupabase`;
-
-    console.log(`[KeystoreService Constructor] Initial wrappedsupabase proxy baseUrl: ${baseUrl}`);
-
-    // Create the test function to verify connectivity
-    this.testConnectivity = async () => {
-      if (!this.supabase) return false;
-      
-      try {
-        // Simple test query
-        const testResponse = await this.supabase.from('keystore').select('id').limit(1);
-        return !!testResponse; // If we get any response, consider it connected
-      } catch (error: unknown) {
-        console.error(`[KeystoreService] Test connection failed: ${error instanceof Error ? error.message : String(error)}`);
-        return false;
-      }
-    };
-    
-    // Initialize with our current best guess URL
-    this.initializeSupabase(baseUrl, serviceRoleKey);
-    
-    // In local development, try alternative URLs if the initial one fails
-    if (useKong) {
-      // For local development, immediately try to validate the connection
-      (async () => {
-        try {
-          // Test initial connection
-          const connected = await this.testConnectivity();
-          if (connected) {
-            console.log(`[KeystoreService] Successfully connected to ${baseUrl}`);
-            return; // Connection is working, no need to try alternatives
-          }
-          
-          // If Kong URL fails, try localhost directly
-          console.log(`[KeystoreService] Failed to connect via Kong URL, trying localhost fallback...`);
-          this.initializeSupabase(localhostUrl, serviceRoleKey);
-          
-          const localhostConnected = await this.testConnectivity();
-          if (localhostConnected) {
-            console.log(`[KeystoreService] Successfully connected to localhost fallback: ${localhostUrl}`);
-            return;
-          }
-          
-          // If localhost fails and we have a SUPABASE_URL, try that
-          if (supabaseWrappedUrl) {
-            console.log(`[KeystoreService] Trying SUPABASE_URL fallback: ${supabaseWrappedUrl}`);
-            this.initializeSupabase(supabaseWrappedUrl, serviceRoleKey);
-            
-            const supabaseFallbackConnected = await this.testConnectivity();
-            if (supabaseFallbackConnected) {
-              console.log(`[KeystoreService] Successfully connected to SUPABASE_URL fallback: ${supabaseWrappedUrl}`);
-              return;
-            }
-          }
-          
-          console.error(`[KeystoreService] All connection attempts failed. Service may not work correctly.`);
-        } catch (err: unknown) {
-          console.error(`[KeystoreService] Error during connectivity testing: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      })();
-    }
-    
-    console.log(`[KeystoreService Constructor] KeystoreService initialized.`);
+    console.log(`[KeystoreService Constructor] KeystoreService initialized with wrappedsupabase proxy.`);
   }
-  
-  // Initialize the Supabase client with the given URL
-  private async initializeSupabase(baseUrl: string, serviceRoleKey: string) {
-    try {
-      console.log(`[KeystoreService] Initializing Supabase client with baseUrl: ${baseUrl}`);
-      
-    this.supabase = createServiceProxy('supabase', {
-        baseUrl,
+
+  // Helper method to call wrappedsupabase
+  private async callWrappedSupabase(chain: any[]) {
+    const response = await fetch(this.wrappedSupabaseUrl, {
+      method: 'POST',
       headers: {
-        'Authorization': `Bearer ${serviceRoleKey}`,
-          'apikey': serviceRoleKey
-      }
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.serviceRoleKey}`,
+        'apikey': this.serviceRoleKey
+      },
+      body: JSON.stringify({ chain })
     });
-    } catch (error: unknown) {
-      console.error(`[KeystoreService] Failed to initialize Supabase client: ${error instanceof Error ? error.message : String(error)}`);
-      throw error;
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`wrappedsupabase call failed: ${response.status} - ${error}`);
     }
+
+    return await response.json();
   }
   
-  // Test connectivity to Supabase
-  private testConnectivity: () => Promise<boolean> = async () => false;
 
   // Get a stored key value
   async getKey(namespace: string, key: string): Promise<string | null> {
-    //console.log(`Getting key ${key} from namespace ${namespace}`);
-    const result = await this.supabase
-      .from('keystore')
-      .select('value') // Select only the value
-      .eq('name', key)
-      .eq('scope', namespace)
-      .limit(1);
+    console.log(`Getting key ${key} from namespace ${namespace}`);
+    
+    try {
+      const result = await this.callWrappedSupabase([
+        { property: 'from', args: ['keystore'] },
+        { property: 'select', args: ['key_value'] },
+        { property: 'eq', args: ['key_name', key] },
+        { property: 'limit', args: [1] }
+      ]);
 
-    // Defensive check: The proxy might return the data array directly, or null/undefined
-    if (Array.isArray(result) && result.length > 0 && result[0].value) {
-       // console.log(`Got data:`, result);
-        return result[0].value;
-    } else if (result && (result as any).error) {
-        // Handle cases where the proxy might forward an error object (less likely now, but safe)
-        const error = (result as any).error;
-        console.error("Get key error response:", error);
-        throw new Error(`Failed to get key: ${error.message || JSON.stringify(error)}`);
-    } else {
-        // Key not found or unexpected response structure
-        // console.log(`Key ${namespace}/${key} not found or unexpected response:`, result);
-        return null;
+      if (result.error) {
+        console.error("Get key error:", result.error);
+        throw new Error(`Failed to get key: ${result.error.message || JSON.stringify(result.error)}`);
+      }
+
+      if (result.data && result.data.length > 0) {
+        console.log(`Successfully retrieved key ${key}`);
+        return result.data[0].key_value;
+      }
+
+      console.log(`Key ${key} not found`);
+      return null;
+    } catch (error) {
+      console.error("Get key error:", error);
+      throw new Error(`Failed to get key: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   
   // Store a key value
   async setKey(namespace: string, key: string, value: string): Promise<boolean> {
-    //console.log(`[Keystore setKey] Setting key '${key}' in namespace '${namespace}'`);
+    console.log(`Setting key '${key}' in namespace '${namespace}'`);
     try {
-      // 1. Check if the key/namespace combination already exists by selecting its id
-      //console.log(`[Keystore setKey] Checking existence for ${namespace}/${key}...`);
-      const checkResponse = await this.supabase
-        .from('keystore')
-        .select('id') // Select id to check existence
-        .eq('name', key)
-        .eq('scope', namespace)
-        .limit(1); // Only need one result to confirm existence
+      // Check if the key exists
+      const checkResult = await this.callWrappedSupabase([
+        { property: 'from', args: ['keystore'] },
+        { property: 'select', args: ['id'] },
+        { property: 'eq', args: ['key_name', key] },
+        { property: 'limit', args: [1] }
+      ]);
 
-      // Log the raw check response for debugging
-      // console.log(`[Keystore setKey] Raw check response for ${namespace}/${key}:`, JSON.stringify(checkResponse)); // Remove logging
-
-      // Error check: Supabase client *might* return an object with an error property if the query itself fails
-      // Although less likely if the proxy just forwards data.
-      if (checkResponse && typeof checkResponse === 'object' && !Array.isArray(checkResponse) && (checkResponse as any).error) {
-           const checkError = (checkResponse as any).error;
-           console.error(`[Keystore setKey] Error during existence check for ${namespace}/${key}:`, checkError);
-           throw new Error(`Failed during existence check: ${checkError.message || JSON.stringify(checkError)}`);
+      if (checkResult.error) {
+        console.error(`Error checking existence for ${key}:`, checkResult.error);
+        throw new Error(`Failed during existence check: ${checkResult.error.message || JSON.stringify(checkResult.error)}`);
       }
 
-      // Check for existence based on the response being a non-empty array
-      const exists = Array.isArray(checkResponse) && checkResponse.length > 0;
-      // console.log(`[Keystore setKey] Key ${namespace}/${key} exists? ${exists}`); // Remove logging
+      const exists = checkResult.data && checkResult.data.length > 0;
+      console.log(`Key ${key} exists? ${exists}`);
 
-      // 2. Update or Insert based on existence
-      let operationResult: any;
+      let result;
       if (exists) {
-        // Key exists, perform an UPDATE
-        // console.log(`[Keystore setKey] Updating existing key ${namespace}/${key}.`); // Remove logging
-        operationResult = await this.supabase
-          .from('keystore')
-          .update({ value })
-          .eq('name', key)
-          .eq('scope', namespace);
+        // Update existing key
+        result = await this.callWrappedSupabase([
+          { property: 'from', args: ['keystore'] },
+          { property: 'update', args: [{ key_value: value, updated_at: new Date().toISOString() }] },
+          { property: 'eq', args: ['key_name', key] }
+        ]);
       } else {
-        // Key does not exist, perform an INSERT
-        // console.log(`[Keystore setKey] Inserting new key ${namespace}/${key}.`); // Remove logging
-        operationResult = await this.supabase
-          .from('keystore')
-          .insert({ name: key, value, scope: namespace });
+        // Insert new key
+        result = await this.callWrappedSupabase([
+          { property: 'from', args: ['keystore'] },
+          { property: 'insert', args: [{ key_name: key, key_value: value }] }
+        ]);
       }
 
-      // 3. Check for errors during the operation
-      const operationError = operationResult?.error;
-      if (operationError) {
+      if (result.error) {
         const action = exists ? 'update' : 'insert';
-        console.error(`[Keystore setKey] Failed to ${action} key ${namespace}/${key}:`, operationError);
-        throw new Error(`Failed to ${action} key: ${operationError.message}`);
+        console.error(`Failed to ${action} key ${key}:`, result.error);
+        throw new Error(`Failed to ${action} key: ${result.error.message || JSON.stringify(result.error)}`);
       }
 
-      // console.log(`[Keystore setKey] Successfully ${ exists ? 'updated' : 'inserted'} key ${namespace}/${key}.`); // Remove logging
+      console.log(`Successfully ${exists ? 'updated' : 'inserted'} key ${key}`);
       return true;
 
     } catch (error) {
-      console.error(`[Keystore setKey] General error for ${namespace}/${key}:`, error);
-      // Re-throw the error to be handled by the calling function/proxy
+      console.error(`General error for ${key}:`, error);
       throw error;
     }
   }
@@ -234,103 +149,83 @@ class KeystoreService {
   // List all keys in a namespace
   async listKeys(namespace: string): Promise<string[]> {
     console.log(`Listing keys in namespace ${namespace}`);
-    const response = await this.supabase
-      .from('keystore')
-      .select('name')
-      .eq('scope', namespace);
     
-    // Handle different response formats (direct array or nested body.data)
-    let data;
-    if (Array.isArray(response)) {
-      data = response;
-    } else if (response && response.body && Array.isArray(response.body.data)) {
-      data = response.body.data;
-    } else if (response && Array.isArray(response.data)) {
-      data = response.data;
-    } else {
-      console.error('Unexpected response format from wrappedsupabase:', response);
-      data = [];
+    try {
+      const result = await this.callWrappedSupabase([
+        { property: 'from', args: ['keystore'] },
+        { property: 'select', args: ['key_name'] }
+      ]);
+      
+      if (result.error) {
+        console.error('Error listing keys:', result.error);
+        throw new Error(`Failed to list keys: ${result.error.message || JSON.stringify(result.error)}`);
+      }
+      
+      console.log(`Found ${result.data?.length || 0} keys`);
+      return result.data?.length ? result.data.map((row: any) => row.key_name) : [];
+    } catch (error) {
+      console.error('Error listing keys:', error);
+      throw new Error(`Failed to list keys: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    console.log(`Found ${data?.length || 0} keys in namespace ${namespace}`);
-    return data?.length ? data.map((row: any) => row.name) : [];
   }
   
   // Check if a key exists in a namespace
   async hasKey(namespace: string, key: string): Promise<boolean> {
     console.log(`Checking if key ${key} exists in namespace ${namespace}`);
-    const result = await this.supabase
-      .from('keystore')
-      .select('id') // Only select ID to minimize data transfer
-      .eq('name', key)
-      .eq('scope', namespace)
-      .limit(1);
     
-    // Handle different response formats
-    let exists = false;
-    if (Array.isArray(result) && result.length > 0) {
-      exists = true;
-    } else if (result && Array.isArray(result.data) && result.data.length > 0) {
-      exists = true;
+    try {
+      const result = await this.callWrappedSupabase([
+        { property: 'from', args: ['keystore'] },
+        { property: 'select', args: ['id'] },
+        { property: 'eq', args: ['key_name', key] },
+        { property: 'limit', args: [1] }
+      ]);
+      
+      if (result.error) {
+        console.error('Error checking key existence:', result.error);
+        throw new Error(`Failed to check key existence: ${result.error.message || JSON.stringify(result.error)}`);
+      }
+      
+      const exists = result.data && result.data.length > 0;
+      console.log(`Key ${key} exists: ${exists}`);
+      return exists;
+    } catch (error) {
+      console.error('Error checking key existence:', error);
+      throw new Error(`Failed to check key existence: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    console.log(`Key ${namespace}/${key} exists: ${exists}`);
-    return exists;
   }
   
   // List all namespaces
   async listNamespaces(): Promise<string[]> {
-    console.log(`[KeystoreService] Attempting listNamespaces...`);
-    let queryResult: any = null;
+    console.log(`Attempting listNamespaces...`);
+    
     try {
-      console.log(`[KeystoreService] Calling supabase.from('keystore').select('scope')...`);
-      queryResult = await this.supabase
-      .from('keystore')
-      .select('scope');
-      //console.log(`[KeystoreService] listNamespaces query completed. Raw result:`, queryResult);
-    } catch (queryError: unknown) {
-        console.error(`[KeystoreService] listNamespaces query FAILED:`, queryError);
-        // Check if it's an Error object before accessing message
-        const message = queryError instanceof Error ? queryError.message : String(queryError);
-        throw new Error(`Failed during Supabase query for listNamespaces: ${message}`);
-    }
-    
-    // Handle different response formats (direct array or nested body.data)
-    let data;
-    let error;
-    
-    if (Array.isArray(queryResult)) {
-      data = queryResult;
-      error = null;
-    } else if (queryResult && queryResult.body) {
-      // Handle the wrapped structure from wrappedsupabase
-      data = queryResult.body.data;
-      error = queryResult.body.error;
-    } else {
-      // Handle direct response structure from Supabase client
-      data = queryResult?.data;
-      error = queryResult?.error;
-    }
+      const result = await this.callWrappedSupabase([
+        { property: 'from', args: ['keystore'] },
+        { property: 'select', args: ['scope'] }
+      ]);
 
-    if (error) {
-        console.error(`[KeystoreService] listNamespaces Supabase returned error:`, error);
-        // Decide if we should throw or return default. Let's throw for clarity.
-        throw new Error(`Supabase error listing namespaces: ${error.message || JSON.stringify(error)}`);
+      if (result.error) {
+        console.error(`listNamespaces error:`, result.error);
+        throw new Error(`Failed to list namespaces: ${result.error.message || JSON.stringify(result.error)}`);
+      }
+      
+      if (result.data?.length) {
+        const namespaces = new Set<string>();
+        result.data.forEach((row: any) => {
+          if (row.scope) namespaces.add(row.scope);
+        });
+        const namespaceList = Array.from(namespaces);
+        console.log(`Found ${namespaceList.length} namespaces:`, namespaceList);
+        return namespaceList;
+      }
+      
+      console.log(`No namespaces found in table, returning defaults.`);
+      return ['global', 'openai'];
+    } catch (error) {
+      console.error(`listNamespaces error:`, error);
+      throw new Error(`Failed to list namespaces: ${error instanceof Error ? error.message : String(error)}`);
     }
-    
-    if (data?.length) {
-      const namespaces = new Set<string>();
-      data.forEach((row: any) => {
-        if (row.scope) namespaces.add(row.scope);
-      });
-      const result = Array.from(namespaces);
-      //console.log(`[KeystoreService] Found ${result.length} namespaces:`, result);
-      return result;
-    }
-    
-    // Fallback if data is null or empty, but no error occurred
-    console.log(`[KeystoreService] No namespaces found in table, returning defaults.`);
-    return ['global', 'openai']; 
   }
   
   // Get the current server time

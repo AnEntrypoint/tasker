@@ -1,5 +1,5 @@
 {
   "imports": {
-    "quickjs-emscripten": "npm:quickjs-emscripten@0.24.0"
+    "quickjs-emscripten": "npm:quickjs-emscripten@0.20.0"
   }
 }
