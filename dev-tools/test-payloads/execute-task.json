@@ -1,0 +1,8 @@
+{
+  "taskName": "comprehensive-gmail-search",
+  "input": {
+    "gmailSearchQuery": "",
+    "maxResultsPerUser": 1,
+    "maxUsersPerDomain": 2
+  }
+}

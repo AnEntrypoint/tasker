@@ -1,0 +1,7 @@
+{
+  "chain": [
+    { "type": "get", "property": "admin" },
+    { "type": "get", "property": "domains" },
+    { "type": "call", "property": "list", "args": [{ "customer": "my_customer" }] }
+  ]
+}

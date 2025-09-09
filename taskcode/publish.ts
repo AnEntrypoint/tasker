@@ -36,8 +36,8 @@ const logger = {
 
 // Simple config
 const CONFIG = {
-  SUPABASE_URL: "http://127.0.0.1:8000", // Always use local URL for development
-  SUPABASE_SERVICE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
+  SUPABASE_URL: "http://localhost:54321", // Use correct Supabase port
+  SUPABASE_SERVICE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("EXT_SUPABASE_SERVICE_ROLE_KEY") || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZn7aDF4JDgTy2WgGdVHUV9lbzN8sM2FvSzs",
   TASK_DIRS: [
     Deno.env.get("TASKS_DIRECTORY") ? `${Deno.env.get("TASKS_DIRECTORY")}/endpoints/` : "./endpoints/"
   ]

@@ -14,8 +14,8 @@ function getSupabaseUrl(): string {
     console.log("[wrappedsupabase] Using SUPABASE_URL:", supabaseUrl);
     return supabaseUrl;
   } else {
-    console.warn("[wrappedsupabase] Neither EXT_SUPABASE_URL nor SUPABASE_URL found in environment. Defaulting to http://127.0.0.1:8080");
-    return 'http://127.0.0.1:8080'; // Default to local development with correct port
+    console.warn("[wrappedsupabase] Neither EXT_SUPABASE_URL nor SUPABASE_URL found in environment. Defaulting to http://127.0.0.1:54321");
+    return 'http://127.0.0.1:54321'; // Default to local development with correct port
   }
 }
 

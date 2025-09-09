@@ -1,8 +1,8 @@
 import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve, ConnInfo } from "https://deno.land/std@0.201.0/http/server.ts";
-import { corsHeaders } from "../quickjs/cors.ts";
-import { executeTask } from "./handlers/task-executor.ts";
+import { corsHeaders } from "../_shared/cors.ts";
+// Removed executeTask import - using new synchronous execution model
 import { jsonResponse, formatTaskResult, formatLogMessage } from "./utils/response-formatter.ts";
 import { TaskRegistry } from "./registry/task-registry.ts";
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -59,12 +59,110 @@ const tasksService = {
         // The SDK wrapper expects the raw result, not a formatted Response
         return { success: true, data: result, logs };
       } else {
-        // Execute from database via executeTask
+        // Execute from database using new synchronous execution model
         logs.push(formatLogMessage('INFO', `[SDK Service] Executing task from database: ${taskIdentifier}`));
-        const response = await executeTask(taskIdentifier, input, options);
-        const result = await response.json(); // executeTask returns a Response
-        // Extract data and logs from the formatted response
-        return { success: result.success, data: result.result, error: result.error, logs: result.logs };
+        
+        // Use internal task execution (same as main handler)
+        const taskFunction = await fetchTaskFromDatabase(undefined, taskIdentifier);
+        if (!taskFunction) {
+          throw new Error(`Task '${taskIdentifier}' not found.`);
+        }
+        
+        // Create task_runs record
+        const taskRunId = crypto.randomUUID();
+        const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+        const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+        
+        const taskRunData = {
+            task_function_id: taskFunction.id,
+            task_name: taskFunction.name,
+            input: input || null,
+            status: 'queued'
+        };
+        
+        const taskRunUrl = `${baseUrl}/rest/v1/task_runs`;
+        const taskRunResponse = await fetch(taskRunUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(taskRunData)
+        });
+        
+        if (!taskRunResponse.ok) {
+            throw new Error(`Failed to create task run: ${taskRunResponse.status}`);
+        }
+        
+        const taskRunResult = await taskRunResponse.json();
+        const actualTaskRunId = Array.isArray(taskRunResult) ? taskRunResult[0].id : taskRunResult.id;
+        
+        // Create initial stack_run
+        const stackRunData = {
+            parent_task_run_id: actualTaskRunId,
+            service_name: 'tasks',
+            method_name: 'execute',
+            args: [taskFunction.name, input || null],
+            status: 'pending',
+            vm_state: {
+                taskCode: taskFunction.code,
+                taskName: taskFunction.name,
+                taskInput: input || null
+            }
+        };
+        
+        const stackRunsUrl = `${baseUrl}/rest/v1/stack_runs`;
+        const stackRunResponse = await fetch(stackRunsUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(stackRunData)
+        });
+        
+        if (!stackRunResponse.ok) {
+            throw new Error(`Failed to create stack run: ${stackRunResponse.status}`);
+        }
+        
+        const stackRunResult = await stackRunResponse.json();
+        const stackRunId = Array.isArray(stackRunResult) ? stackRunResult[0].id : stackRunResult.id;
+        
+        // CRITICAL FIX: Always trigger stack processor synchronously for FIFO processing
+        try {
+            const stackProcessorUrl = `${baseUrl}/functions/v1/simple-stack-processor`;
+            const triggerResponse = await fetch(stackProcessorUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                },
+                body: JSON.stringify({ stackRunId })
+            });
+            
+            if (triggerResponse.ok) {
+                logs.push(formatLogMessage('INFO', `Stack processor triggered successfully for stack run ${stackRunId}`));
+            } else {
+                const errorText = await triggerResponse.text();
+                logs.push(formatLogMessage('ERROR', `Failed to trigger stack processor: ${triggerResponse.status} - ${errorText}`));
+            }
+        } catch (error) {
+            logs.push(formatLogMessage('ERROR', `Error triggering stack processor: ${error}`));
+        }
+        
+        // Return success with task run ID for monitoring
+        return { 
+            success: true, 
+            taskRunId: actualTaskRunId,
+            stackRunId: stackRunId,
+            data: { message: 'Task submitted successfully and will process automatically', taskRunId: actualTaskRunId },
+            logs 
+        };
       }
     } catch (error) {
       const errorMsg = `[SDK Service] Error executing task ${taskIdentifier}: ${error instanceof Error ? error.message : String(error)}`;
@@ -100,6 +198,301 @@ const CORS_HEADERS = {
 
 const LOG_PREFIX_BASE = "[TasksHandlerEF]"; // Tasks Handler Edge Function
 
+// Helper function to check if the queue is busy
+async function checkQueueBusy(baseUrl: string, serviceRoleKey: string): Promise<boolean> {
+    try {
+        // Check for any task_runs or stack_runs that are currently processing
+        const taskRunsUrl = `${baseUrl}/rest/v1/task_runs?status=in.(processing)&limit=1`;
+        const stackRunsUrl = `${baseUrl}/rest/v1/stack_runs?status=in.(processing,pending,pending_resume)&limit=1`;
+        
+        const [taskRunsResponse, stackRunsResponse] = await Promise.all([
+            fetch(taskRunsUrl, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            }),
+            fetch(stackRunsUrl, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            })
+        ]);
+        
+        if (!taskRunsResponse.ok || !stackRunsResponse.ok) {
+            hostLog(LOG_PREFIX_BASE, 'warn', 'Failed to check queue status, assuming busy');
+            return true; // Assume busy if we can't check
+        }
+        
+        const taskRuns = await taskRunsResponse.json();
+        const stackRuns = await stackRunsResponse.json();
+        
+        const isBusy = (taskRuns.length > 0) || (stackRuns.length > 0);
+        hostLog(LOG_PREFIX_BASE, 'info', `Queue check: ${isBusy ? 'busy' : 'free'} (${taskRuns.length} task_runs, ${stackRuns.length} stack_runs)`);
+        
+        return isBusy;
+    } catch (error) {
+        hostLog(LOG_PREFIX_BASE, 'error', `Error checking queue status: ${error}`);
+        return true; // Assume busy on error
+    }
+}
+
+// Helper function to execute a stack run synchronously
+async function executeStackRunSynchronously(stackRunId: string, baseUrl: string, serviceRoleKey: string): Promise<{success: boolean, result?: any, error?: string}> {
+    try {
+        hostLog(LOG_PREFIX_BASE, 'info', `Starting synchronous execution of stack run ${stackRunId}`);
+        
+        // Mark task as processing
+        const updateUrl = `${baseUrl}/rest/v1/task_runs?parent_stack_run_id=eq.${stackRunId}`;
+        await fetch(updateUrl, {
+            method: 'PATCH',
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                status: 'processing',
+                updated_at: new Date().toISOString()
+            })
+        });
+        
+        // Execute the stack run via simple-stack-processor
+        const stackProcessorUrl = `${baseUrl}/functions/v1/simple-stack-processor`;
+        const response = await fetch(stackProcessorUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${serviceRoleKey}`
+            },
+            body: JSON.stringify({
+                stackRunId: stackRunId
+            })
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Stack processor failed: ${response.status} - ${errorText}`);
+        }
+        
+        const result = await response.json();
+        hostLog(LOG_PREFIX_BASE, 'info', `Stack run ${stackRunId} executed with status: ${result.status}`);
+        
+        // After execution, trigger next queued task if any
+        await triggerNextQueuedTask(baseUrl, serviceRoleKey);
+        
+        return {
+            success: result.status === 'completed',
+            result: result.result,
+            error: result.error
+        };
+    } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        hostLog(LOG_PREFIX_BASE, 'error', `Synchronous execution failed: ${errorMessage}`);
+        
+        // Try to trigger next queued task even on failure
+        try {
+            await triggerNextQueuedTask(baseUrl, serviceRoleKey);
+        } catch (triggerError) {
+            hostLog(LOG_PREFIX_BASE, 'error', `Failed to trigger next task after error: ${triggerError}`);
+        }
+        
+        return {
+            success: false,
+            error: errorMessage
+        };
+    }
+}
+
+// FIFO Processing Chain - continuously processes tasks until queue is empty
+async function triggerFIFOProcessingChain(baseUrl: string, serviceRoleKey: string): Promise<void> {
+    const logPrefix = '[FIFO-Chain]';
+    hostLog(logPrefix, 'info', 'Starting FIFO processing chain');
+    
+    let processedCount = 0;
+    const maxProcessingCycles = 100; // Safety limit to prevent infinite loops
+    
+    while (processedCount < maxProcessingCycles) {
+        try {
+            // Find the next queued task or pending stack run (FIFO order)
+            const queuedTasksUrl = `${baseUrl}/rest/v1/task_runs?status=eq.queued&order=created_at.asc&limit=1`;
+            const taskResponse = await fetch(queuedTasksUrl, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+            
+            if (!taskResponse.ok) {
+                hostLog(logPrefix, 'warn', 'Failed to check for queued tasks');
+                break;
+            }
+            
+            const queuedTasks = await taskResponse.json();
+            
+            // Also check for pending stack runs
+            const pendingStackUrl = `${baseUrl}/rest/v1/stack_runs?status=in.(pending,pending_resume)&order=created_at.asc&limit=1`;
+            const stackResponse = await fetch(pendingStackUrl, {
+                headers: {
+                    'Authorization': `Bearer ${serviceRoleKey}`,
+                    'apikey': serviceRoleKey
+                }
+            });
+            
+            const pendingStacks = stackResponse.ok ? await stackResponse.json() : [];
+            
+            // If no queued tasks and no pending stacks, we're done
+            if (queuedTasks.length === 0 && pendingStacks.length === 0) {
+                hostLog(logPrefix, 'info', `FIFO processing complete - processed ${processedCount} items`);
+                break;
+            }
+            
+            // Process pending stack runs first (they might be waiting on children)
+            if (pendingStacks.length > 0) {
+                const stackRun = pendingStacks[0];
+                hostLog(logPrefix, 'info', `Processing pending stack run: ${stackRun.id}`);
+                
+                const stackProcessResponse = await fetch(`${baseUrl}/functions/v1/simple-stack-processor`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${serviceRoleKey}`
+                    },
+                    body: JSON.stringify({ stackRunId: stackRun.id })
+                });
+                
+                if (stackProcessResponse.ok) {
+                    processedCount++;
+                    hostLog(logPrefix, 'info', `Stack run ${stackRun.id} processed`);
+                    
+                    // Brief pause to prevent overwhelming the system
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    continue;
+                } else {
+                    hostLog(logPrefix, 'error', `Failed to process stack run ${stackRun.id}`);
+                }
+            }
+            
+            // Process queued tasks
+            if (queuedTasks.length > 0) {
+                const nextTask = queuedTasks[0];
+                hostLog(logPrefix, 'info', `Processing queued task: ${nextTask.id}`);
+                
+                // Find the associated stack run for this task
+                const taskStackUrl = `${baseUrl}/rest/v1/stack_runs?parent_task_run_id=eq.${nextTask.id}&limit=1`;
+                const taskStackResponse = await fetch(taskStackUrl, {
+                    headers: {
+                        'Authorization': `Bearer ${serviceRoleKey}`,
+                        'apikey': serviceRoleKey
+                    }
+                });
+                
+                if (taskStackResponse.ok) {
+                    const taskStacks = await taskStackResponse.json();
+                    if (taskStacks.length > 0) {
+                        const stackRun = taskStacks[0];
+                        
+                        // Trigger simple stack processor for this task
+                        const triggerResponse = await fetch(`${baseUrl}/functions/v1/simple-stack-processor`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${serviceRoleKey}`
+                            },
+                            body: JSON.stringify({ stackRunId: stackRun.id })
+                        });
+                        
+                        if (triggerResponse.ok) {
+                            processedCount++;
+                            hostLog(logPrefix, 'info', `Task ${nextTask.id} processing initiated`);
+                        } else {
+                            hostLog(logPrefix, 'error', `Failed to trigger processing for task ${nextTask.id}`);
+                        }
+                    }
+                }
+            }
+            
+            // Brief pause between processing cycles
+            await new Promise(resolve => setTimeout(resolve, 200));
+            
+        } catch (error) {
+            hostLog(logPrefix, 'error', `Error in FIFO processing cycle: ${error}`);
+            break;
+        }
+    }
+    
+    if (processedCount >= maxProcessingCycles) {
+        hostLog(logPrefix, 'warn', `FIFO processing stopped after ${processedCount} cycles (safety limit reached)`);
+    }
+    
+    hostLog(logPrefix, 'info', `FIFO processing chain completed - total items processed: ${processedCount}`);
+}
+
+// Helper function to trigger the next queued task
+async function triggerNextQueuedTask(baseUrl: string, serviceRoleKey: string): Promise<void> {
+    try {
+        // Find the next queued task
+        const queuedTasksUrl = `${baseUrl}/rest/v1/task_runs?status=eq.queued&order=created_at.asc&limit=1`;
+        const response = await fetch(queuedTasksUrl, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey
+            }
+        });
+        
+        if (!response.ok) {
+            hostLog(LOG_PREFIX_BASE, 'warn', 'Failed to check for queued tasks');
+            return;
+        }
+        
+        const queuedTasks = await response.json();
+        
+        if (queuedTasks.length === 0) {
+            hostLog(LOG_PREFIX_BASE, 'info', 'No queued tasks to trigger');
+            return;
+        }
+        
+        const nextTask = queuedTasks[0];
+        hostLog(LOG_PREFIX_BASE, 'info', `Triggering next queued task: ${nextTask.id}`);
+        
+        // Find the associated stack run
+        const stackRunUrl = `${baseUrl}/rest/v1/stack_runs?parent_task_run_id=eq.${nextTask.id}&limit=1`;
+        const stackRunResponse = await fetch(stackRunUrl, {
+            headers: {
+                'Authorization': `Bearer ${serviceRoleKey}`,
+                'apikey': serviceRoleKey
+            }
+        });
+        
+        if (stackRunResponse.ok) {
+            const stackRuns = await stackRunResponse.json();
+            if (stackRuns.length > 0) {
+                const stackRunId = stackRuns[0].id;
+                
+                // Trigger the simple stack processor asynchronously (fire and forget)
+                const stackProcessorUrl = `${baseUrl}/functions/v1/simple-stack-processor`;
+                fetch(stackProcessorUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${serviceRoleKey}`
+                    },
+                    body: JSON.stringify({
+                        stackRunId: stackRunId
+                    })
+                }).catch(error => {
+                    hostLog(LOG_PREFIX_BASE, 'error', `Failed to trigger next task processor: ${error}`);
+                });
+                
+                hostLog(LOG_PREFIX_BASE, 'info', `Next task ${nextTask.id} triggered asynchronously`);
+            }
+        }
+    } catch (error) {
+        hostLog(LOG_PREFIX_BASE, 'error', `Error triggering next queued task: ${error}`);
+    }
+}
+
 async function tasksHandler(req: Request): Promise<Response> {
     // Handle CORS preflight requests
     if (req.method === "OPTIONS") {
@@ -133,6 +526,34 @@ async function tasksHandler(req: Request): Promise<Response> {
         hostLog(LOG_PREFIX_BASE, 'error', "Invalid JSON request body:", error.message);
         return new Response(simpleStringify({ error: "Invalid JSON request body.", details: error.message }), {
             status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+        });
+    }
+
+    // Check for special service method calls first
+    if (requestBody.service === "tasks" && requestBody.method === "triggerFIFO") {
+        hostLog(LOG_PREFIX_BASE, 'info', "Received triggerFIFO request, starting FIFO processing chain");
+        
+        // Start the FIFO processing chain
+        const baseUrl = Deno.env.get('SUPABASE_URL') || 'http://localhost:54321';
+        const serviceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY') || 
+                             Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+        
+        if (!serviceRoleKey) {
+            return new Response(simpleStringify({ error: "Service configuration error" }), {
+                status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
+            });
+        }
+        
+        // Don't await - let it run in background
+        triggerFIFOProcessingChain(baseUrl, serviceRoleKey).catch(error => {
+            hostLog(LOG_PREFIX_BASE, 'error', `Error in FIFO processing chain: ${error}`);
+        });
+        
+        return new Response(simpleStringify({ 
+            status: "ok", 
+            message: "FIFO processing chain started" 
+        }), {
+            status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
     }
 
@@ -209,13 +630,15 @@ async function tasksHandler(req: Request): Promise<Response> {
         
         hostLog(logPrefix, 'info', `Task_run record created successfully: ${taskRunId}`);
 
-        // Step 3: Create the initial stack_runs record to kick off the execution
+        // Step 3: Skip queue busy check - always process immediately with stack processor
+        
+        // Step 4: Create the initial stack_runs record to kick off the execution
         hostLog(logPrefix, 'info', `Creating initial stack_run for task_run ${taskRunId}`);
         
-        // Use direct fetch for creating stack_run record
+        // Use direct fetch for creating stack_run record - call deno-executor directly
         const stackRunData = {
             parent_task_run_id: taskRunId,
-            service_name: 'tasks',
+            service_name: 'deno-executor',
             method_name: 'execute',
             args: [taskFunction.name, input || null],
             status: 'pending',
@@ -279,41 +702,38 @@ async function tasksHandler(req: Request): Promise<Response> {
         
         hostLog(logPrefix, 'info', `Initial stack_run ${stackRunId} created. Task '${taskName}' (run ID: ${taskRunId}) has been successfully offloaded.`);
 
-        // Step 4: Immediately trigger stack processor to avoid relying on database triggers
-        try {
-            hostLog(logPrefix, 'info', `Directly triggering stack processor for task run ${taskRunId}`);
-            const stackProcessorUrl = `${baseUrl}/functions/v1/stack-processor`;
-            
-            const processorResponse = await fetch(stackProcessorUrl, {
+        // Step 4: No longer pre-triggering stack processor - will be handled in Step 5
+
+        // Step 5: Always trigger the simple stack processor for automatic FIFO processing
+        hostLog(logPrefix, 'info', `Always triggering simple stack processor for automatic processing of stack run ${stackRunId}`);
+
+        // CRITICAL: Use fire-and-forget pattern to avoid blocking
+        const stackProcessorUrl = `${baseUrl}/functions/v1/simple-stack-processor`;
+        hostLog(logPrefix, 'info', `Triggering stack processor for automatic processing (async)`);
+
+        // Fire-and-forget - don't wait for response
+        setTimeout(() => {
+            fetch(stackProcessorUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${serviceRoleKey}`
+                    'Authorization': `Bearer ${serviceRoleKey}`,
                 },
-                body: JSON.stringify({
-                    stackRunId: stackRunId
-                })
+                body: JSON.stringify({ trigger: 'process-next' })
+            }).catch(error => {
+                hostLog(logPrefix, 'warn', `Async stack processor trigger failed (non-critical): ${error}`);
             });
-            
-            if (!processorResponse.ok) {
-                const errorText = await processorResponse.text();
-                hostLog(logPrefix, 'warn', `Failed to trigger stack processor (will continue asynchronously): HTTP ${processorResponse.status}`, errorText);
-                // Continue even if direct processing fails (it will be picked up by cron)
-            } else {
-                hostLog(logPrefix, 'info', `Stack processor triggered successfully for task run ${taskRunId}`);
-            }
-        } catch (e) {
-            const error = e instanceof Error ? e : new Error(String(e));
-            hostLog(logPrefix, 'warn', `Error triggering stack processor (will continue asynchronously):`, error.message);
-            // Continue even if direct processing fails (it will be picked up by cron)
-        }
-
-        // Step 5: Respond to the user indicating the task has been accepted
+        }, 0);
+        
+        // Return immediately - processing will continue automatically
         return new Response(simpleStringify({
-            message: "Task accepted and queued for asynchronous processing.",
-            taskRunId: taskRunId
+            message: "Task submitted successfully and will process automatically.",
+            taskRunId: taskRunId,
+            stackRunId: stackRunId,
+            status: "submitted",
+            info: "Processing will continue automatically until completion - no manual triggers needed"
         }), {
-            status: 202, // HTTP 202 Accepted: Request accepted, processing not complete
+            status: 202, // HTTP 202 Accepted: Processing started
             headers: { ...CORS_HEADERS, "Content-Type": "application/json" }
         });
 
