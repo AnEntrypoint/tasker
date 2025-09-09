@@ -8,14 +8,15 @@ config({ export: true });
 const supabaseUrlEnv = Deno.env.get('SUPABASE_URL') || '';
 // If the URL is the edge functions URL, use the REST API URL instead for local dev
 const SUPABASE_URL = (supabaseUrlEnv.includes('127.0.0.1:8000') || supabaseUrlEnv.includes('kong:8000'))
-    ? 'http://localhost:8080' 
+    ? 'http://localhost:54321' 
     : (supabaseUrlEnv || '');
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
-// REMOVED Fetching/Validation of SERVICE_ROLE_KEY as per user instruction
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
 // ---> Validate critical environment variables
 if (!SUPABASE_URL) throw new Error('Missing required environment variable: SUPABASE_URL');
 if (!SUPABASE_ANON_KEY) throw new Error('Missing required environment variable: SUPABASE_ANON_KEY');
+if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error('Missing required environment variable: SUPABASE_SERVICE_ROLE_KEY');
 // <--- END Validate
 
 /**
@@ -83,128 +84,111 @@ export async function executeTask(
         // Continue execution even if task_runs record creation fails
       }
 
-      // Start task execution in the background
-      (async () => {
-        try {
-          // Call the QuickJS edge function
-        console.log(formatLogMessage('INFO', `Invoking QuickJS function for task ${taskId}...`));
-          const quickJsUrl = `${SUPABASE_URL}/functions/v1/quickjs`;
-          
-          // DEBUG: Log the payload being sent
-          const payload = {
-            taskCode: task.code,
-            taskName: task.name,
-            taskInput: input || {},
-            taskRunId: taskRunId,
-            stackRunId: crypto.randomUUID(),
-            toolNames: [],
-            initialVmState: null
-          };
-          console.log(formatLogMessage('DEBUG', `QuickJS payload: ${JSON.stringify(payload)}`));
+    // Execute task synchronously - start immediately
+    console.log(formatLogMessage('INFO', `Starting synchronous execution of task ${taskId}...`));
+    
+    try {
+      // Call the deno-executor edge function
+      console.log(formatLogMessage('INFO', `Invoking deno-executor function for task ${taskId}...`));
+      const denoExecutorUrl = `${SUPABASE_URL}/functions/v1/deno-executor`;
+      
+      // DEBUG: Log the payload being sent
+      const payload = {
+        taskName: task.name,
+        taskRunId: taskRunId,
+        stackRunId: null // Let system auto-generate
+      };
+      console.log(formatLogMessage('DEBUG', `Deno executor payload: ${JSON.stringify(payload)}`));
 
-          // Add a timeout for the fetch call
-          const controller = new AbortController();
-          const timeoutDuration = 180000;
-          const timeoutId = setTimeout(() => controller.abort(), timeoutDuration);
+      const response = await fetch(denoExecutorUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+        },
+        body: JSON.stringify(payload)
+      });
 
-          let response: Response;
-          try {
-            response = await fetch(quickJsUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
-              },
-              body: JSON.stringify(payload),
-            signal: controller.signal
-            });
-          } catch (fetchError) {
-            if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-                const errorMsg = `QuickJS function call timed out after ${timeoutDuration / 1000} seconds.`;
-                console.log(formatLogMessage('ERROR', errorMsg));
+      const responseBody = await response.text();
 
-                // Update the task_runs record with the error
-                await supabaseClient.from('task_runs').update({
-                  status: 'error',
-                  error: { message: errorMsg },
-                  updated_at: new Date().toISOString()
-                }).eq('id', taskRunId);
+      if (!response.ok) {
+        const errorMsg = `Failed to execute task: ${response.status} - ${responseBody}`;
+        console.log(formatLogMessage('ERROR', errorMsg));
 
-                return; // Exit the background task
-            } else {
-                const errorMsg = `Fetch error calling QuickJS: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`;
-                console.log(formatLogMessage('ERROR', errorMsg));
+        // Update the task_runs record with the error
+        await supabaseClient.from('task_runs').update({
+          status: 'error',
+          error: { message: errorMsg },
+          updated_at: new Date().toISOString()
+        }).eq('id', taskRunId);
 
-                // Update the task_runs record with the error
-                await supabaseClient.from('task_runs').update({
-                  status: 'error',
-                  error: { message: errorMsg },
-                  updated_at: new Date().toISOString()
-                }).eq('id', taskRunId);
+        return jsonResponse(formatErrorResponse(errorMsg), 500);
+      }
 
-                return; // Exit the background task
-            }
-          } finally {
-            clearTimeout(timeoutId); // Clear the timeout watcher
-          }
+      // Parse the response
+      let result;
+      try {
+        result = JSON.parse(responseBody);
+      } catch (parseError) {
+        console.log(formatLogMessage('ERROR', `Failed to parse deno-executor response: ${parseError}`));
+        return jsonResponse(formatErrorResponse(`Failed to parse response: ${parseError}`), 500);
+      }
 
-          const responseBody = await response.text(); // Read body once
+      // Check if task was suspended (expected behavior)
+      if (result && result.__hostCallSuspended) {
+        console.log(formatLogMessage('INFO', `Task ${taskId} suspended as expected - execution will resume on stack completion`));
+        return jsonResponse({
+          message: "Task started and suspended",
+          taskRunId,
+          status: "suspended",
+          suspended: true
+        }, 202);
+      }
 
-          if (!response.ok) {
-          const errorMsg = `Failed to execute task: ${response.status} - ${responseBody}`;
-            console.log(formatLogMessage('ERROR', errorMsg));
+      // If task completed immediately (no suspend), update with result
+      if (result && !result.__hostCallSuspended) {
+        await supabaseClient.from('task_runs').update({
+          status: 'completed',
+          result,
+          updated_at: new Date().toISOString(),
+          ended_at: new Date().toISOString()
+        }).eq('id', taskRunId);
+        
+        return jsonResponse({
+          message: "Task completed immediately",
+          taskRunId,
+          status: "completed",
+          result
+        }, 200);
+      }
 
-            // Update the task_runs record with the error
-            await supabaseClient.from('task_runs').update({
-              status: 'error',
-              error: { message: errorMsg },
-              updated_at: new Date().toISOString()
-            }).eq('id', taskRunId);
-
-            return; // Exit the background task
-          }
-
-        // If execution was successful but the task is suspended waiting for a nested call
-        // The QuickJS function will update the task_run status directly
-        // We don't need to update it here
-
-        // For immediate completion, update with result
-        try {
-          const result = JSON.parse(responseBody);
-          if (result && !result.__hostCallSuspended) {
-            await supabaseClient.from('task_runs').update({
-              status: 'completed',
-              result,
-              updated_at: new Date().toISOString(),
-              ended_at: new Date().toISOString()
-            }).eq('id', taskRunId);
-        }
-        } catch (parseError) {
-          console.log(formatLogMessage('ERROR', `Failed to parse QuickJS response: ${parseError}`));
-          // Don't update task run status here as it might be handled by the stack processor
-        }
+      // Fallback - shouldn't reach here
+      return jsonResponse({
+        message: "Task execution completed with unknown state",
+        taskRunId,
+        status: "unknown"
+      }, 200);
+      
     } catch (error) {
-        console.log(formatLogMessage('ERROR', `Background task execution error: ${error}`));
-        // Update task run with error
+      console.log(formatLogMessage('ERROR', `Task execution error: ${error}`));
+      
+      // Update task run with error
       try {
         await supabaseClient.from('task_runs').update({
           status: 'error',
-            error: { message: error instanceof Error ? error.message : String(error) },
-            updated_at: new Date().toISOString(),
-            ended_at: new Date().toISOString()
+          error: { message: error instanceof Error ? error.message : String(error) },
+          updated_at: new Date().toISOString(),
+          ended_at: new Date().toISOString()
         }).eq('id', taskRunId);
       } catch (updateError) {
-          console.log(formatLogMessage('ERROR', `Failed to update task run with error: ${updateError}`));
+        console.log(formatLogMessage('ERROR', `Failed to update task run with error: ${updateError}`));
       }
-      }
-    })();
+      
+      return jsonResponse(formatErrorResponse(`Task execution failed: ${error instanceof Error ? error.message : String(error)}`), 500);
+    }
 
-    // Immediately return a response with the task ID for tracking
-    return jsonResponse({
-      message: "Task execution started",
-      taskRunId,
-      status: "queued"
-    }, 202);
+    // This code is now moved above to execute synchronously
+    // The function will return the appropriate response from the try block above
   } catch (error) {
     console.error(`Error in executeTask: ${error instanceof Error ? error.message : String(error)}`);
     return jsonResponse(formatErrorResponse(`Error executing task: ${error instanceof Error ? error.message : String(error)}`), 500);

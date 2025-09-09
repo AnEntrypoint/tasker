@@ -1,6 +1,6 @@
 import OpenAI from 'npm:openai';
 import { serve } from "https://deno.land/std@0.131.0/http/server.ts";
-import { corsHeaders } from '../quickjs/cors.ts';
+import { corsHeaders } from '../_shared/cors.ts';
 // Use the wrapper client to interact with keystore
 import { createServiceProxy } from 'npm:sdk-http-wrapper@1.0.10/client';
 

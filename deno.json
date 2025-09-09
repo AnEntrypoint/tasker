@@ -4,7 +4,7 @@
   },
   "nodeModulesDir": "auto",
   "tasks": {
-    "dev": "deno run --allow-net --allow-read --allow-env --watch supabase/functions/quickjs/index.ts",
+    "dev": "deno run --allow-net --allow-read --allow-env --watch supabase/functions/deno-executor/index.ts",
     "publish": "deno run --allow-read --allow-net --allow-env taskcode/publish.ts",
     "publish-blog": "deno run --allow-read --allow-net --allow-env taskcode/publish.ts --specific blog-generator"
   },

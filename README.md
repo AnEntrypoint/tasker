@@ -1,183 +1,197 @@
-# Supabase CLI
+# Gmail Search Task Runner
 
-[![Coverage Status](https://coveralls.io/repos/github/supabase/cli/badge.svg?branch=main)](https://coveralls.io/github/supabase/cli?branch=main) [![Bitbucket Pipelines](https://img.shields.io/bitbucket/pipelines/supabase-cli/setup-cli/master?style=flat-square&label=Bitbucket%20Canary)](https://bitbucket.org/supabase-cli/setup-cli/pipelines) [![Gitlab Pipeline Status](https://img.shields.io/gitlab/pipeline-status/sweatybridge%2Fsetup-cli?label=Gitlab%20Canary)
-](https://gitlab.com/sweatybridge/setup-cli/-/pipelines)
+A Gmail search task runner built on Supabase Edge Functions with automatic suspend/resume execution for infinite length tasks.
 
-[Supabase](https://supabase.io) is an open source Firebase alternative. We're building the features of Firebase using enterprise-grade open source tools.
+## Overview
 
-This repository contains all the functionality for Supabase CLI.
+This system implements a sophisticated task execution engine that can handle long-running Gmail searches across multiple Google Workspace domains without timeouts or memory issues. The core innovation is an automatic suspend/resume mechanism that breaks up work call by call, enabling infinite length task execution.
 
-- [x] Running Supabase locally
-- [x] Managing database migrations
-- [x] Creating and deploying Supabase Functions
-- [x] Generating types directly from your database schema
-- [x] Making authenticated HTTP requests to [Management API](https://supabase.com/docs/reference/api/introduction)
+## Key Features
 
-## Getting started
+- **Automatic Suspend/Resume**: Tasks automatically suspend on external calls and resume with results
+- **HTTP-Based Stack Processing**: No polling - pure HTTP chain reaction for task orchestration
+- **Infinite Length Tasks**: Break up work call by call to handle unlimited task complexity
+- **Real Testing Conditions**: No mocks or simulations - only real working conditions
+- **Causality Preservation**: Parent tasks receive child results before making subsequent calls
+- **Concurrent Gmail Search**: Process 98+ users across multiple domains automatically
 
-### Install the CLI
+## Architecture
 
-Available via [NPM](https://www.npmjs.com) as dev dependency. To install:
+### Core Components
+
+**Task Execution Engine**
+- `supabase/functions/tasks/` - Main task execution service that submits tasks and triggers stack processing
+- `supabase/functions/deno-executor/` - Deno runtime with automatic suspend/resume for external calls
+- `supabase/functions/simple-stack-processor/` - Sequential FIFO processor that chains HTTP calls (no polling)
+
+**Service Wrappers**
+- `supabase/functions/wrappedgapi/` - Google API integration with service account authentication
+- `supabase/functions/wrappedkeystore/` - Key-value store for credentials (Google API keys, admin emails)
+- `supabase/functions/wrappedsupabase/` - Database operations proxy
+
+**Task Code**
+- `taskcode/endpoints/comprehensive-gmail-search.js` - Main Gmail search task implementation
+- `comprehensive-gmail-search-cli.js` - CLI tool for testing the Gmail search
+
+### Suspension and Resume Mechanism
+
+The core innovation is the automatic suspend/resume capability:
+
+1. **External Call Detection**: `__callHostTool__(serviceName, methodPath, args)` triggers suspension
+2. **Child Stack Run Creation**: External calls create child stack runs for API operations
+3. **Parent Suspension**: Parent tasks marked `suspended_waiting_child` until children complete
+4. **Task Suspension**: `TASK_SUSPENDED` error immediately stops task execution
+5. **Child Processing**: simple-stack-processor handles external API calls
+6. **Automatic Resume**: Child completion triggers parent resume with results via HTTP chain
+7. **Causality Preservation**: Parents receive child results before making subsequent calls
+
+This enables infinite length tasks by breaking up work call by call without timeouts or memory issues.
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+
+- Supabase CLI
+- Google Workspace admin account with API access
+
+### Installation
+
+1. **Clone the repository**
+```bash
+git clone <repository-url>
+cd tasker
+```
+
+2. **Install dependencies**
+```bash
+npm install
+```
+
+3. **Start Supabase**
+```bash
+supabase start
+npm run serve
+```
+
+4. **Configure Google API credentials**
+```bash
+# Add your Google service account key and admin email to keystore
+# See CLAUDE.md for detailed setup instructions
+```
+
+5. **Publish the Gmail search task**
+```bash
+npm run publish:task
+```
+
+### Quick Test
+
+Run a simple Gmail search test:
 
 ```bash
-npm i supabase --save-dev
+npm run test:gmail-simple
 ```
 
-To install the beta release channel:
+Or use the CLI directly:
 
 ```bash
-npm i supabase@beta --save-dev
+node comprehensive-gmail-search-cli.js --maxUsersPerDomain 2 --maxResultsPerUser 1
 ```
 
-When installing with yarn 4, you need to disable experimental fetch with the following nodejs config.
+## Usage
 
-```
-NODE_OPTIONS=--no-experimental-fetch yarn add supabase
-```
+### Running Gmail Searches
 
-> **Note**
-For Bun versions below v1.0.17, you must add `supabase` as a [trusted dependency](https://bun.sh/guides/install/trusted) before running `bun add -D supabase`.
-
-<details>
-  <summary><b>macOS</b></summary>
-
-  Available via [Homebrew](https://brew.sh). To install:
-
-  ```sh
-  brew install supabase/tap/supabase
-  ```
-
-  To install the beta release channel:
-  
-  ```sh
-  brew install supabase/tap/supabase-beta
-  brew link --overwrite supabase-beta
-  ```
-  
-  To upgrade:
-
-  ```sh
-  brew upgrade supabase
-  ```
-</details>
-
-<details>
-  <summary><b>Windows</b></summary>
-
-  Available via [Scoop](https://scoop.sh). To install:
-
-  ```powershell
-  scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
-  scoop install supabase
-  ```
-
-  To upgrade:
-
-  ```powershell
-  scoop update supabase
-  ```
-</details>
-
-<details>
-  <summary><b>Linux</b></summary>
-
-  Available via [Homebrew](https://brew.sh) and Linux packages.
-
-  #### via Homebrew
-
-  To install:
-
-  ```sh
-  brew install supabase/tap/supabase
-  ```
-
-  To upgrade:
-
-  ```sh
-  brew upgrade supabase
-  ```
-
-  #### via Linux packages
-
-  Linux packages are provided in [Releases](https://github.com/supabase/cli/releases). To install, download the `.apk`/`.deb`/`.rpm`/`.pkg.tar.zst` file depending on your package manager and run the respective commands.
-
-  ```sh
-  sudo apk add --allow-untrusted <...>.apk
-  ```
-
-  ```sh
-  sudo dpkg -i <...>.deb
-  ```
-
-  ```sh
-  sudo rpm -i <...>.rpm
-  ```
-
-  ```sh
-  sudo pacman -U <...>.pkg.tar.zst
-  ```
-</details>
-
-<details>
-  <summary><b>Other Platforms</b></summary>
-
-  You can also install the CLI via [go modules](https://go.dev/ref/mod#go-install) without the help of package managers.
-
-  ```sh
-  go install github.com/supabase/cli@latest
-  ```
-
-  Add a symlink to the binary in `$PATH` for easier access:
-
-  ```sh
-  ln -s "$(go env GOPATH)/bin/cli" /usr/bin/supabase
-  ```
-
-  This works on other non-standard Linux distros.
-</details>
-
-<details>
-  <summary><b>Community Maintained Packages</b></summary>
-
-  Available via [pkgx](https://pkgx.sh/). Package script [here](https://github.com/pkgxdev/pantry/blob/main/projects/supabase.com/cli/package.yml).
-  To install in your working directory:
-
-  ```bash
-  pkgx install supabase
-  ```
-
-  Available via [Nixpkgs](https://nixos.org/). Package script [here](https://github.com/NixOS/nixpkgs/blob/master/pkgs/development/tools/supabase-cli/default.nix).
-</details>
-
-### Run the CLI
-
+**Simple Test (2 users, 1 result each):**
 ```bash
-supabase bootstrap
+npm run test:gmail-simple
 ```
 
-Or using npx:
-
+**Full Test (98 users, 300 results each):**
 ```bash
-npx supabase bootstrap
+npm run test:gmail
 ```
 
-The bootstrap command will guide you through the process of setting up a Supabase project using one of the [starter](https://github.com/supabase-community/supabase-samples/blob/main/samples.json) templates.
-
-## Docs
-
-Command & config reference can be found [here](https://supabase.com/docs/reference/cli/about).
-
-## Breaking changes
-
-We follow semantic versioning for changes that directly impact CLI commands, flags, and configurations.
-
-However, due to dependencies on other service images, we cannot guarantee that schema migrations, seed.sql, and generated types will always work for the same CLI major version. If you need such guarantees, we encourage you to pin a specific version of CLI in package.json.
-
-## Developing
-
-To run from source:
-
-```sh
-# Go >= 1.22
-go run . help
+**Custom Search:**
+```bash
+node comprehensive-gmail-search-cli.js \
+  --gmailSearchQuery "subject:important" \
+  --maxUsersPerDomain 10 \
+  --maxResultsPerUser 50
 ```
+
+### Development Commands
+
+**Start Infrastructure:**
+```bash
+supabase start              # Start local Supabase
+npm run serve              # Start edge functions server
+```
+
+**Task Publishing:**
+```bash
+npm run publish:task       # Publish comprehensive Gmail search task to database
+```
+
+**Debugging:**
+```bash
+npm run debug:db               # Check database state
+npm run debug:logs             # View recent logs
+npm run debug:clear            # Clear database tables
+```
+
+## How It Works
+
+### Task Execution Flow
+
+1. **Submission**: CLI calls `/functions/v1/tasks/execute`
+2. **Processing**: Task service creates task_run and triggers simple-stack-processor
+3. **Execution**: deno-executor runs task code with `__callHostTool__` for external calls
+4. **Suspension**: External calls throw `TASK_SUSPENDED` error with suspension data
+5. **Child Creation**: deno-executor creates child stack_run and marks parent `suspended_waiting_child`
+6. **Child Processing**: simple-stack-processor processes child stack_run for external API call
+7. **Resume**: Child completion triggers parent resume with results via HTTP chain
+8. **Continuation**: Parent task continues execution with child results
+9. **Chaining**: Process repeats for each external call, maintaining causality
+
+### Database Schema
+
+**Core Tables:**
+- `task_functions` - Stores published task code and metadata
+- `task_runs` - Tracks task execution instances with suspension state
+- `stack_runs` - Individual operation calls in task execution chain
+- `keystore` - Credentials storage (Google API keys, admin emails)
+
+**Important**: Never reset the database. Clear tables individually:
+```bash
+DELETE FROM stack_runs WHERE id > 0;
+DELETE FROM task_runs WHERE id > 0;
+# Keep task_functions and keystore intact
+```
+
+## Development Principles
+
+**Performance Requirements:**
+- Never wait more than 5 seconds for any step to run
+- Use concurrently for running server and client together
+- Client waits for server before running
+
+**Testing Principles:**
+- Never use mocks or fake data - only test with real working conditions
+- Use MCP REPL tool instead of curl for debugging Deno functions
+- Always check CLI output properly
+
+**Stack Processing Rules:**
+- Stack processor uses HTTP chaining, not polling
+- Each process starts the next and exits immediately (fire-and-forget)
+- Sequential processing with database locks
+- External calls via `__callHostTool__` create child stack runs and suspend parent
+- Parent tasks marked `suspended_waiting_child` until children complete
+- Suspension mechanism preserves causality
+
+## Documentation
+
+- `CLAUDE.md` - Comprehensive development guide and architecture documentation
+- `dev-tools/README.md` - Development tools and debugging guide
+- See function-specific documentation in each `supabase/functions/` directory

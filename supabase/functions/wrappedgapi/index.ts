@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
-import { corsHeaders } from '../quickjs/cors.ts'
+import { corsHeaders } from '../_shared/cors.ts'
 import { JWT } from 'npm:google-auth-library@^9'
 import { google } from 'npm:googleapis@^133'
 import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.10/server"
@@ -17,7 +17,7 @@ let cachedCreds: any = null;
 let cachedAdminEmail: string | null = null;
 
 // Get keystore base URL - update to use the correct port
-const keystoreUrl = `${Deno.env.get('SUPABASE_URL') || 'http://127.0.0.1:8080'}/functions/v1/wrappedkeystore`;
+const keystoreUrl = `${Deno.env.get('SUPABASE_URL') || 'http://127.0.0.1:54321'}/functions/v1/wrappedkeystore`;
 
 // Cache control values
 const TOKEN_REFRESH_BUFFER = 300000; // Refresh token 5 minutes before expiry
@@ -58,6 +58,8 @@ async function getCredentials(): Promise<any> {
     // First, parse the outer JSON string
     const unquotedText = JSON.parse(credText);
     
+    // Using real Google API credentials from keystore
+    
     // Then parse the actual credential JSON
     cachedCreds = JSON.parse(unquotedText);
     
@@ -69,10 +71,12 @@ async function getCredentials(): Promise<any> {
   }
 }
 
+
 /**
  * Get admin email with caching
  */
 async function getAdminEmail(): Promise<string> {
+  
   if (cachedAdminEmail) return cachedAdminEmail;
   
   const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
@@ -119,11 +123,12 @@ async function getAdminEmail(): Promise<string> {
 }
 
 /**
- * Get access token with caching
+ * Get access token with caching - supports impersonation
  */
-async function getAccessToken(scopes: string[]): Promise<string> {
-  // Sort scopes to ensure consistent cache key
-  const scopeKey = [...scopes].sort().join(',');
+async function getAccessToken(scopes: string[], impersonateUser?: string): Promise<string> {
+  
+  // Sort scopes to ensure consistent cache key, include impersonation user
+  const scopeKey = [...scopes].sort().join(',') + (impersonateUser ? `|${impersonateUser}` : '');
   
   // Check cache first
   const now = Date.now();
@@ -138,12 +143,16 @@ async function getAccessToken(scopes: string[]): Promise<string> {
   const creds = await getCredentials();
   const adminEmail = await getAdminEmail();
   
+  // Use impersonation user if specified, otherwise use admin email
+  const subjectEmail = impersonateUser || adminEmail;
+  console.log(`Impersonating user: ${subjectEmail}`);
+  
   // Create JWT client with the requested scopes
   const jwt = new JWT({
     email: creds.client_email,
     key: creds.private_key,
     scopes: scopes,
-    subject: adminEmail
+    subject: subjectEmail
   });
   
   // Get token - this is the CPU-intensive part with timeout
@@ -212,6 +221,24 @@ serve(async (req) => {
     if (body?.method === 'echo') {
       return new Response(
         JSON.stringify({ echo: body.args[0] || {} }),
+        { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      );
+    }
+    
+    // Test method for debugging resume payload
+    if (body?.chain?.[0]?.property === 'test' && 
+        body.chain[1]?.property === 'getStepData') {
+      
+      const args = body.chain[1]?.args?.[0] || {};
+      console.log(`Test getStepData called with:`, args);
+      
+      return new Response(
+        JSON.stringify({
+          stepNumber: args.stepNumber,
+          timestamp: args.timestamp,
+          testData: `Step ${args.stepNumber} data`,
+          responseAt: new Date().toISOString()
+        }),
         { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
@@ -323,6 +350,8 @@ serve(async (req) => {
         
         console.log(`Using customer ID: ${customerId}`);
         
+
+        
         // Make direct API call using cached token
         const domainsUrl = `https://admin.googleapis.com/admin/directory/v1/customer/${customerId}/domains`;
         const response = await fetch(domainsUrl, {
@@ -341,8 +370,15 @@ serve(async (req) => {
           // Parse as JSON for successful responses
           const data = JSON.parse(responseBody);
           console.log('🔍 [TRACE] Response parsed successfully');
+          
+          // Clean response - return only the domains data without Google API metadata
+          const cleanedResponse = {
+            domains: data.domains || []
+          };
+          
+          console.log(`🔍 [TRACE] Returning cleaned domains response with ${cleanedResponse.domains.length} domains`);
           return new Response(
-            JSON.stringify(data),
+            JSON.stringify(cleanedResponse),
             { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
           );
         } else {
@@ -419,6 +455,8 @@ serve(async (req) => {
         
         console.log(`Listing users with params: ${queryParams.toString()}`);
         
+
+        
         // Make direct API call using cached token
         const usersUrl = `https://admin.googleapis.com/admin/directory/v1/users?${queryParams.toString()}`;
         const response = await fetch(usersUrl, {
@@ -437,8 +475,15 @@ serve(async (req) => {
           // Parse as JSON for successful responses
           const data = JSON.parse(responseBody);
           console.log('🔍 [TRACE] Response parsed successfully');
+          
+          // Clean response - return only the users data without Google API metadata
+          const cleanedResponse = {
+            users: data.users || []
+          };
+          
+          console.log(`🔍 [TRACE] Returning cleaned users response with ${cleanedResponse.users.length} users`);
           return new Response(
-            JSON.stringify(data),
+            JSON.stringify(cleanedResponse),
             { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
           );
         } else {
@@ -463,15 +508,15 @@ serve(async (req) => {
         body.chain[3]?.property === 'list') {
       
       try {
-        // Get token with appropriate scopes for Gmail
-        const token = await getAccessToken([
-          'https://www.googleapis.com/auth/gmail.readonly',
-          'https://mail.google.com/'
-        ]);
-        
         // Get parameters from the request
         const listArgs = body.chain[3]?.args?.[0] || {};
         const userId = listArgs.userId || 'me';
+        
+        // Get token with appropriate scopes for Gmail - IMPERSONATE the specific user
+        const token = await getAccessToken([
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://mail.google.com/'
+        ], userId);
         
         // Build query parameters
         const queryParams = new URLSearchParams();
@@ -490,6 +535,8 @@ serve(async (req) => {
         }
         
         console.log(`Listing Gmail messages for user ${userId} with params: ${queryParams.toString()}`);
+        
+
         
         // Make direct API call using cached token
         const messagesUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(userId)}/messages?${queryParams.toString()}`;
@@ -532,15 +579,15 @@ serve(async (req) => {
         body.chain[3]?.property === 'get') {
       
       try {
-        // Get token with appropriate scopes for Gmail
-        const token = await getAccessToken([
-          'https://www.googleapis.com/auth/gmail.readonly',
-          'https://mail.google.com/'
-        ]);
-        
         // Get parameters from the request
         const getArgs = body.chain[3]?.args?.[0] || {};
         const userId = getArgs.userId || 'me';
+        
+        // Get token with appropriate scopes for Gmail - IMPERSONATE the specific user
+        const token = await getAccessToken([
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://mail.google.com/'
+        ], userId);
         const messageId = getArgs.id;
         
         if (!messageId) {
@@ -558,6 +605,8 @@ serve(async (req) => {
         }
         
         console.log(`Getting Gmail message ${messageId} for user ${userId} with params: ${queryParams.toString()}`);
+        
+
         
         // Make direct API call using cached token
         const messageUrl = `https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(userId)}/messages/${encodeURIComponent(messageId)}?${queryParams.toString()}`;
@@ -626,7 +675,7 @@ serve(async (req) => {
               const creds = await getCredentials();
               const adminEmail = await getAdminEmail();
               
-              // Create JWT client with the requested scopes
+              // Create JWT client with the requested scopes - use admin for admin API calls
               const jwt = new JWT({
                 email: creds.client_email,
                 key: creds.private_key,

@@ -25,7 +25,7 @@ class KeystoreService {
   private serviceRoleKey: string;
 
   constructor() {
-    const supabaseUrl = Deno.env.get("SUPABASE_URL") || 'http://127.0.0.1:8080';
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") || 'http://127.0.0.1:54321';
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     
     if (!serviceRoleKey) {

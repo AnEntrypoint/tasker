@@ -105,7 +105,7 @@ serve(async (req) => {
       console.log(`Created stack run with ID: ${stackRun.id}`);
       
       // Trigger stack processor
-      const procResponse = await fetch(`${supabaseUrl}/functions/v1/stack-processor`, {
+      const procResponse = await fetch(`${supabaseUrl}/functions/v1/simple-stack-processor`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
