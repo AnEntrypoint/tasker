@@ -215,4 +215,14 @@ Verify that the comprehensive Gmail search task executes completely from start t
    - Suspend/resume failures causing execution to halt
    - Result storage issues preventing final output
 
+
 Do not declare success until you can demonstrate a complete task run that produces meaningful Gmail search results with actual email data from real user accounts across multiple domains. If any step fails or produces empty results when data should exist, diagnose and fix the root cause before proceeding.
+
+# Core Functionality
+- This is a Gmail search task runner built on Supabase Edge Functions with QuickJS VM, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
+- The codebase should prioritize being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
+- Parent tasks must receive results from child calls before making subsequent calls to maintain proper causality and prevent parallel execution issues.
+
+# Project Details
+- The project uses wrapped edge functions for all external integrations (wrappedgapi, wrappedkeystore, wrappedsupabase) and requires real testing conditions without mocks or simulations.
+- Development requires concurrently running server and client with 5-second max wait times, and uses MCP REPL tool instead of curl for debugging Deno edge functions.
