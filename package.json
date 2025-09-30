@@ -29,7 +29,8 @@
     "debug:logs": "npm run debug:function -- --action logs"
   },
   "dependencies": {
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "flowstate-execution": "file:../flowstate"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
