@@ -1,10 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 import { corsHeaders } from '../_shared/cors.ts'
-import { JWT } from 'npm:google-auth-library@^9'
-import { google } from 'npm:googleapis@^133'
-import { processSdkRequest } from "npm:sdk-http-wrapper@1.0.10/server"
-import type { ChainItem } from "npm:sdk-http-wrapper@1.0.10/server"
+import { BaseHttpHandler, HttpStatus, createHealthCheckResponse } from "../_shared/http-handler.ts"
+import { config } from "../_shared/config-service.ts"
+import { serviceRegistry } from "../_shared/service-registry.ts"
 
 // In-memory token cache by scope - persists between requests
 const tokenCache = new Map<string, {
@@ -16,8 +15,7 @@ const tokenCache = new Map<string, {
 let cachedCreds: any = null;
 let cachedAdminEmail: string | null = null;
 
-// Get keystore base URL - update to use the correct port
-const keystoreUrl = `${Deno.env.get('SUPABASE_URL') || 'http://127.0.0.1:54321'}/functions/v1/wrappedkeystore`;
+// Keystore service is accessed through service registry
 
 // Cache control values
 const TOKEN_REFRESH_BUFFER = 300000; // Refresh token 5 minutes before expiry
@@ -27,42 +25,20 @@ const TOKEN_REFRESH_BUFFER = 300000; // Refresh token 5 minutes before expiry
  */
 async function getCredentials(): Promise<any> {
   if (cachedCreds) return cachedCreds;
-  
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
-  
-  const response = await fetch(keystoreUrl, {
-    method: "POST",
-  headers: {
-      "Content-Type": "application/json",
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': anonKey
-    },
-    body: JSON.stringify({
-      action: "getKey",
-      namespace: "global",
-      key: "GAPI_KEY"
-    })
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to get credentials: ${response.status}`);
-  }
-  
+
   try {
-    // Get response text
-    const credText = await response.text();
-    console.log(`Got credentials response, length: ${credText.length}`);
-    
-    // The keystore service returns a double-quoted JSON string
-    // First, parse the outer JSON string
-    const unquotedText = JSON.parse(credText);
-    
-    // Using real Google API credentials from keystore
-    
-    // Then parse the actual credential JSON
-    cachedCreds = JSON.parse(unquotedText);
-    
+    // Use service registry to call keystore
+    const result = await serviceRegistry.call('keystore', 'getKey', ['global', 'GAPI_KEY']);
+
+    if (!result.success) {
+      throw new Error(`Failed to get credentials: ${result.error}`);
+    }
+
+    console.log(`Got credentials response from keystore`);
+
+    // The keystore service returns the credential JSON directly
+    cachedCreds = JSON.parse(result.data);
+
     console.log(`Loaded credentials for ${cachedCreds.client_email}`);
     return cachedCreds;
   } catch (error) {
@@ -76,41 +52,25 @@ async function getCredentials(): Promise<any> {
  * Get admin email with caching
  */
 async function getAdminEmail(): Promise<string> {
-  
   if (cachedAdminEmail) return cachedAdminEmail;
-  
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
-  
-  const response = await fetch(keystoreUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      'Authorization': `Bearer ${serviceRoleKey}`,
-      'apikey': anonKey
-    },
-    body: JSON.stringify({
-      action: "getKey",
-      namespace: "global",
-      key: "GAPI_ADMIN_EMAIL"
-    })
-  });
-  
-  if (!response.ok) {
-    throw new Error(`Failed to get admin email: ${response.status}`);
-  }
-  
+
   try {
-    const responseText = await response.text();
-    console.log(`Got admin email response, length: ${responseText.length}`);
-    
-    // Parse the JSON string
-    const emailValue = JSON.parse(responseText);
-    
+    // Use service registry to call keystore
+    const result = await serviceRegistry.call('keystore', 'getKey', ['global', 'GAPI_ADMIN_EMAIL']);
+
+    if (!result.success) {
+      throw new Error(`Failed to get admin email: ${result.error}`);
+    }
+
+    console.log(`Got admin email response from keystore`);
+
+    // The keystore service returns the email value directly
+    const emailValue = result.data;
+
     if (!emailValue || emailValue.trim() === '') {
       throw new Error('Empty or invalid admin email received');
     }
-    
+
     // Ensure we have a non-null string
     const email: string = emailValue;
     cachedAdminEmail = email;
@@ -124,98 +84,133 @@ async function getAdminEmail(): Promise<string> {
 
 /**
  * Get access token with caching - supports impersonation
+ * Note: This function now makes HTTP-based OAuth calls instead of using JWT library
  */
 async function getAccessToken(scopes: string[], impersonateUser?: string): Promise<string> {
-  
+
   // Sort scopes to ensure consistent cache key, include impersonation user
   const scopeKey = [...scopes].sort().join(',') + (impersonateUser ? `|${impersonateUser}` : '');
-  
+
   // Check cache first
   const now = Date.now();
   const cachedData = tokenCache.get(scopeKey);
-  
+
   if (cachedData && cachedData.expiry > now + TOKEN_REFRESH_BUFFER) {
     console.log(`Using cached token for ${scopeKey}`);
     return cachedData.token;
   }
-  
+
   console.log(`Generating new token for ${scopeKey}`);
   const creds = await getCredentials();
   const adminEmail = await getAdminEmail();
-  
+
   // Use impersonation user if specified, otherwise use admin email
   const subjectEmail = impersonateUser || adminEmail;
   console.log(`Impersonating user: ${subjectEmail}`);
-  
-  // Create JWT client with the requested scopes
-  const jwt = new JWT({
-    email: creds.client_email,
-    key: creds.private_key,
-    scopes: scopes,
-    subject: subjectEmail
-  });
-  
-  // Get token - this is the CPU-intensive part with timeout
-  console.log('Starting JWT authorization...');
-  const startTime = Date.now();
-  
+
   try {
-    // Add timeout to JWT authorization
-    await Promise.race([
-      jwt.authorize(),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('JWT authorization timeout after 30 seconds')), 30000)
-      )
-    ]);
+    // Create JWT assertion for OAuth 2.0 flow
+    const header = { alg: "RS256", typ: "JWT" };
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      iss: creds.client_email,
+      scope: scopes.join(' '),
+      aud: "https://oauth2.googleapis.com/token",
+      exp: now + 3600,
+      iat: now,
+      sub: subjectEmail
+    };
+
+    // Encode JWT components
+    const encodeBase64 = (str: string) => btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const jwtHeader = encodeBase64(JSON.stringify(header));
+    const jwtPayload = encodeBase64(JSON.stringify(payload));
+
+    // Create signature using Web Crypto API
+    const jwtData = `${jwtHeader}.${jwtPayload}`;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(jwtData);
+
+    // Import private key
+    const privateKeyPem = creds.private_key.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s/g, '');
+    const privateKeyDer = Uint8Array.from(atob(privateKeyPem), c => c.charCodeAt(0));
+
+    const privateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      privateKeyDer.buffer,
+      {
+        name: 'RSASSA-PKCS1-v1_5',
+        hash: 'SHA-256'
+      },
+      false,
+      ['sign']
+    );
+
+    // Sign the data
+    const signatureArrayBuffer = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, data);
+    const signature = btoa(String.fromCharCode(...new Uint8Array(signatureArrayBuffer))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+    const jwt = `${jwtData}.${signature}`;
+
+    // Exchange JWT for access token
+    console.log('Exchanging JWT for access token...');
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: jwt
+      })
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      throw new Error(`Failed to get access token: ${tokenResponse.status} - ${errorText}`);
+    }
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenData.access_token) {
+      throw new Error('No access token received');
+    }
+
+    // Cache the token
+    const expiresAt = Date.now() + (tokenData.expires_in * 1000);
+    tokenCache.set(scopeKey, {
+      token: tokenData.access_token,
+      expiry: expiresAt
+    });
+
+    const expiryDate = new Date(expiresAt).toISOString();
+    console.log(`Generated new token, expires at ${expiryDate}`);
+    return tokenData.access_token;
+
   } catch (error) {
-    console.error(`JWT authorization failed after ${Date.now() - startTime}ms:`, error);
-    throw error;
+    console.error(`Token generation failed:`, error);
+    throw new Error(`Failed to generate access token: ${(error as Error).message}`);
   }
-  
-  console.log(`JWT authorization completed in ${Date.now() - startTime}ms`);
-  
-  if (!jwt.credentials.access_token || !jwt.credentials.expiry_date) {
-    throw new Error('Failed to get valid token');
-  }
-  
-  // Cache the token
-  tokenCache.set(scopeKey, {
-    token: jwt.credentials.access_token as string,
-    expiry: jwt.credentials.expiry_date as number
-  });
-  
-  const expiryDate = new Date(jwt.credentials.expiry_date as number).toISOString();
-  console.log(`Generated new token, expires at ${expiryDate}`);
-  return jwt.credentials.access_token as string;
 }
 
-// Main server handler
-serve(async (req) => {
-  // Handle CORS
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
-  }
-
-  // Fast health check
-    const url = new URL(req.url);
+// Google API HTTP Handler
+class WrappedGapiHandler extends BaseHttpHandler {
+  protected async routeHandler(req: Request, url: URL): Promise<Response> {
+    // Fast health check
     if (url.pathname.endsWith('/health')) {
-      return new Response(
-        JSON.stringify({ 
-          status: 'ok', 
+      return createHealthCheckResponse("wrappedgapi", "healthy", {
         cache_size: tokenCache.size,
-          timestamp: new Date().toISOString() 
-        }),
-        { status: 200, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
+        timestamp: new Date().toISOString()
+      });
     }
-    
-  try {
-    // Get request body - read as text first to avoid consuming it
-    console.log('🔍 [TRACE] About to read request body...');
-    const bodyText = await req.text().catch(() => '{"method":"unknown"}');
-    console.log('🔍 [TRACE] Request body read successfully, length:', bodyText.length);
-    const body = JSON.parse(bodyText);
-    console.log('🔍 [TRACE] Request body parsed, method:', body?.method);
+  
+    try {
+      // Get request body - read as text first to avoid consuming it
+      console.log('🔍 [TRACE] About to read request body...');
+      const bodyText = await req.text().catch(() => '{"method":"unknown"}');
+      console.log('🔍 [TRACE] Request body read successfully, length:', bodyText.length);
+      const body = JSON.parse(bodyText);
+      console.log('🔍 [TRACE] Request body parsed, method:', body?.method);
     
     // Echo for testing
     if (body?.method === 'echo') {
@@ -642,91 +637,35 @@ serve(async (req) => {
       }
     }
     
-    // For all other Google API requests, use the SDK processor
-    // Create a new request with the body text since we already consumed it
-    console.log('🔍 [TRACE] Creating new request for SDK processor...');
-    const newReq = new Request(req.url, {
-      method: req.method,
-      headers: Object.fromEntries(req.headers.entries()),
-      body: bodyText
-    });
-    console.log('🔍 [TRACE] New request created, calling processSdkRequest...');
-    
-    const result = await processSdkRequest(newReq, {
-      sdkConfig: {
-        gapi: {
-          factory: async (chain: ChainItem[]) => {
-            try {
-              // Get service type
-              const svc = chain[0]?.property;
-              
-              // Get appropriate scopes
-              const scopes = [];
-              if (svc === 'gmail') {
-                scopes.push('https://www.googleapis.com/auth/gmail.readonly');
-                scopes.push('https://mail.google.com/');
-              } else if (svc === 'admin') {
-                scopes.push('https://www.googleapis.com/auth/admin.directory.user.readonly');
-                scopes.push('https://www.googleapis.com/auth/admin.directory.domain.readonly');
-                scopes.push('https://www.googleapis.com/auth/admin.directory.customer.readonly');
-              }
-              
-              // Get credentials and create JWT client directly
-              const creds = await getCredentials();
-              const adminEmail = await getAdminEmail();
-              
-              // Create JWT client with the requested scopes - use admin for admin API calls
-              const jwt = new JWT({
-                email: creds.client_email,
-                key: creds.private_key,
-                scopes: scopes,
-                subject: adminEmail
-              });
-              
-              // Authorize the JWT client
-              await jwt.authorize();
-              
-              // Create Google service with JWT client directly
-              if (svc === 'admin') {
-                return google.admin({
-                  version: 'directory_v1',
-                  auth: jwt
-                });
-              } else if (svc === 'gmail') {
-                return google.gmail({
-                  version: 'v1',
-                  auth: jwt
-                });
-              } else {
-                throw new Error(`Unsupported Google service: ${svc}`);
-              }
-            } catch (error) {
-              console.error(`Service factory error: ${(error as Error).message}`);
-              throw error;
-            }
-          },
-          methodWrapper: async (svc: any, method: any, args: any[]) => {
-            try {
-              return await method(...args);
-            } catch (error) {
-              throw new Error(`API call failed: ${(error as Error).message}`);
-            }
-          }
-        }
-      },
-      corsHeaders
-    });
-    console.log('🔍 [TRACE] processSdkRequest completed successfully');
-    return result;
-  } catch (error) {
-    console.log('🔍 [TRACE] Error in wrappedgapi:', (error as Error).message);
-    console.log('🔍 [TRACE] Error stack:', (error as Error).stack);
+    // For all other Google API requests, handle manually
+    // Since we removed the SDK processor, we only support the direct implementations above
+    console.log('🔍 [TRACE] No direct implementation found for request, returning error...');
+
     return new Response(
-      JSON.stringify({ 
-        error: (error as Error).message || "Unknown error",
+      JSON.stringify({
+        error: `Unsupported Google API request. The wrappedgapi service now only supports specific direct implementations: admin.domains.list, admin.users.list, gmail.users.messages.list, gmail.users.messages.get`,
+        received_method: body?.method,
+        received_chain: body?.chain?.map((item: any) => item.property),
+        supported_methods: [
+          'admin.domains.list',
+          'admin.users.list',
+          'gmail.users.messages.list',
+          'gmail.users.messages.get',
+          'echo',
+          'checkCredentials',
+          'getTokenInfo',
+          'clearTokenCache'
+        ],
         timestamp: new Date().toISOString()
       }),
-      { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+      { status: 400, headers: { "Content-Type": "application/json", ...corsHeaders } }
     );
+    } catch (error) {
+      return this.handleError(error, 'Error in wrappedgapi');
+    }
   }
-});
+}
+
+// Create handler instance and start serving
+const wrappedGapiHandler = new WrappedGapiHandler();
+serve((req) => wrappedGapiHandler.handle(req));
