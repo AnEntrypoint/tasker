@@ -6,12 +6,12 @@ import { TaskRegistry } from "./registry/task-registry.ts";
 import { generateSchema, formatSchema } from './services/schema-generator.ts';
 import { parseJSDocComments } from './utils/jsdoc-parser.ts';
 import { GeneratedSchema } from "./types/index.ts";
-import { executeMethodChain } from "npm:sdk-http-wrapper@1.0.10/server";
 import { hostLog, simpleStringify } from '../_shared/utils.ts';
 import { supabaseClient, SUPABASE_URL, SUPABASE_ANON_KEY, SERVICE_ROLE_KEY } from './config/supabase-config.ts';
 import { tasksService } from './services/tasks-service.ts';
 import { createResponse, createErrorResponse, createCorsPreflightResponse, CORS_HEADERS, LOG_PREFIX_BASE } from './utils/response-utils.ts';
 import { checkQueueBusy, executeStackRunSynchronously, triggerFIFOProcessingChain, triggerNextQueuedTask } from './services/stack-processor.ts';
+import { serviceRegistry } from "../_shared/service-registry.ts";
 
 declare global {
   var __updatedFields: Record<string, any>;
@@ -95,17 +95,22 @@ async function tasksHandler(req: Request): Promise<Response> {
 // Status handler
 async function statusHandler(req: Request): Promise<Response> {
     try {
-        const { data: taskRuns, error } = await supabaseClient
-            .from('task_runs')
-            .select('id, status, created_at, updated_at')
-            .order('created_at', { ascending: false })
-            .limit(10);
+        // Use service registry to query database
+        const result = await serviceRegistry.call('database', 'select', [
+            'task_runs',
+            'id, status, created_at, updated_at'
+        ]);
 
-        if (error) {
-            return createErrorResponse(`Database error: ${error.message}`, [], 500);
+        if (!result.success) {
+            return createErrorResponse(`Database error: ${result.error}`, [], 500);
         }
 
-        return createResponse({ task_runs: taskRuns || [] });
+        // Order and limit the results
+        const taskRuns = (result.data || [])
+            .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+            .slice(0, 10);
+
+        return createResponse({ task_runs: taskRuns });
     } catch (error) {
         return createErrorResponse(
             `Error fetching status: ${error instanceof Error ? error.message : String(error)}`,

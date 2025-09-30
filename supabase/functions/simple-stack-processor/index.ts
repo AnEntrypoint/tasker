@@ -1,18 +1,16 @@
 /**
  * Simple Stack Processor - Lightweight version for fast boot times
- * 
+ *
  * Processes stack runs with minimal complexity to avoid worker timeouts
+ * Uses unified service registry for all external calls to enable FlowState integration
  */
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
+import { serviceRegistry } from "../_shared/service-registry.ts";
 
 // Environment variables
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-
-// Create Supabase client
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
 // CORS headers
 const corsHeaders = {
@@ -29,16 +27,17 @@ function log(level: string, message: string) {
 async function tryLockTaskChain(taskRunId: number, retries: number = 3): Promise<boolean> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      // Try to insert a lock record - will fail if already exists
-      const { error } = await supabase
-        .from('task_locks')
-        .insert({
+      // Try to insert a lock record via service registry - will fail if already exists
+      const result = await serviceRegistry.call('database', 'insert', [{
+        table: 'task_locks',
+        records: [{
           task_run_id: taskRunId,
           locked_at: new Date().toISOString(),
           locked_by: `simple-stack-processor-${Date.now()}-${Math.random()}`
-        });
+        }]
+      }]);
 
-      if (error) {
+      if (!result.success) {
         // Lock already exists or other error
         if (attempt < retries) {
           // Wait a bit before retrying
@@ -65,13 +64,13 @@ async function tryLockTaskChain(taskRunId: number, retries: number = 3): Promise
 // Release task chain lock
 async function unlockTaskChain(taskRunId: number): Promise<void> {
   try {
-    const { error } = await supabase
-      .from('task_locks')
-      .delete()
-      .eq('task_run_id', taskRunId);
+    const result = await serviceRegistry.call('database', 'delete', [{
+      table: 'task_locks',
+      query: { task_run_id: taskRunId }
+    }]);
 
-    if (error) {
-      log("error", `Failed to unlock task chain ${taskRunId}: ${error.message}`);
+    if (!result.success) {
+      log("error", `Failed to unlock task chain ${taskRunId}: ${result.error}`);
     } else {
       log("info", `Successfully unlocked task chain ${taskRunId}`);
     }
@@ -122,13 +121,14 @@ function startContinuousProcessing(): void {
   processingInterval = setInterval(async () => {
     // Check if there are any pending stack runs before triggering
     try {
-      const { data, error } = await supabase
-        .from('stack_runs')
-        .select('id')
-        .eq('status', 'pending')
-        .limit(1);
+      const result = await serviceRegistry.call('database', 'select', [{
+        table: 'stack_runs',
+        query: { status: 'pending' },
+        select: ['id'],
+        limit: 1
+      }]);
 
-      if (error || !data || data.length === 0) {
+      if (!result.success || !result.data || result.data.length === 0) {
         consecutiveEmptyRuns++;
         if (consecutiveEmptyRuns >= MAX_CONSECUTIVE_EMPTY_RUNS) {
           // Temporarily stop processing to reduce resource usage
@@ -163,19 +163,22 @@ function stopContinuousProcessing(): void {
 // Check if there are any processing stack runs for this task chain
 async function isTaskChainBusy(taskRunId: number): Promise<boolean> {
   try {
-    const { data, error } = await supabase
-      .from('stack_runs')
-      .select('id')
-      .eq('parent_task_run_id', taskRunId)
-      .eq('status', 'processing')
-      .limit(1);
+    const result = await serviceRegistry.call('database', 'select', [{
+      table: 'stack_runs',
+      query: {
+        parent_task_run_id: taskRunId,
+        status: 'processing'
+      },
+      select: ['id'],
+      limit: 1
+    }]);
 
-    if (error) {
-      log("error", `Failed to check task chain status: ${error.message}`);
+    if (!result.success) {
+      log("error", `Failed to check task chain status: ${result.error}`);
       return false;
     }
 
-    return data && data.length > 0;
+    return result.data && result.data.length > 0;
   } catch (error) {
     log("error", `Failed to check task chain status: ${error instanceof Error ? error.message : String(error)}`);
     return false;
@@ -184,33 +187,34 @@ async function isTaskChainBusy(taskRunId: number): Promise<boolean> {
 
 // Get stack run from database
 async function getStackRun(id: number) {
-  const { data, error } = await supabase
-    .from('stack_runs')
-    .select('*')
-    .eq('id', id)
-    .single();
-    
-  if (error) throw new Error(`Failed to get stack run ${id}: ${error.message}`);
-  return data;
+  const result = await serviceRegistry.call('database', 'select', [{
+    table: 'stack_runs',
+    query: { id: id },
+    single: true
+  }]);
+
+  if (!result.success) throw new Error(`Failed to get stack run ${id}: ${result.error}`);
+  return result.data;
 }
 
 // Update stack run status
 async function updateStackRunStatus(id: number, status: string, result?: any, error?: string) {
-  const updates: any = { 
-    status, 
-    updated_at: new Date().toISOString() 
+  const updates: any = {
+    status,
+    updated_at: new Date().toISOString()
   };
-  
+
   if (result !== undefined) updates.result = result;
   if (error !== undefined) updates.error = error;
   if (status === 'completed' || status === 'failed') updates.ended_at = new Date().toISOString();
-  
-  const { error: updateError } = await supabase
-    .from('stack_runs')
-    .update(updates)
-    .eq('id', id);
-    
-  if (updateError) throw new Error(`Failed to update stack run ${id}: ${updateError.message}`);
+
+  const updateResult = await serviceRegistry.call('database', 'update', [{
+    table: 'stack_runs',
+    query: { id: id },
+    update: updates
+  }]);
+
+  if (!updateResult.success) throw new Error(`Failed to update stack run ${id}: ${updateResult.error}`);
 }
 
 // Process a service call
@@ -232,13 +236,19 @@ async function processServiceCall(stackRun: any) {
         taskInput: vm_state?.taskInput || args[1]
       };
 
-      response = await fetch(`${SUPABASE_URL}/functions/v1/deno-executor`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`
-        },
-        body: JSON.stringify(requestBody)
+      response = await serviceRegistry.call('deno-executor', 'execute', [
+        requestBody.taskName,
+        requestBody.taskCode,
+        requestBody.taskInput,
+        requestBody.taskRunId,
+        requestBody.stackRunId,
+        requestBody.toolNames,
+        requestBody.initialVmState
+      ], {
+        serviceName: 'deno-executor',
+        methodName: 'execute',
+        taskRunId: stackRun.parent_task_run_id?.toString(),
+        stackRunId: stackRun.id.toString()
       });
     } else if (service_name === 'tasks' && method_name === 'execute') {
       // Special handling for nested task calls
@@ -247,13 +257,15 @@ async function processServiceCall(stackRun: any) {
         input: args[1]
       };
 
-      response = await fetch(`${SUPABASE_URL}/functions/v1/tasks/execute`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`
-        },
-        body: JSON.stringify(requestBody)
+      response = await serviceRegistry.call('tasks', 'execute', [
+        requestBody.taskName,
+        requestBody.input,
+        requestBody.options
+      ], {
+        serviceName: 'tasks',
+        methodName: 'execute',
+        taskRunId: stackRun.parent_task_run_id?.toString(),
+        stackRunId: stackRun.id.toString()
       });
     } else {
       // Standard wrapped service call
@@ -268,21 +280,19 @@ async function processServiceCall(stackRun: any) {
         }
       });
 
-      response = await fetch(`${SUPABASE_URL}/functions/v1/${service_name}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`
-        },
-        body: JSON.stringify({ chain })
+      response = await serviceRegistry.call(service_name, method_name, args, {
+        serviceName: service_name,
+        methodName: method_name,
+        taskRunId: stackRun.parent_task_run_id?.toString(),
+        stackRunId: stackRun.id.toString()
       });
     }
 
-    if (!response.ok) {
-      throw new Error(`HTTP error ${response.status}: ${await response.text()}`);
+    if (!response.success) {
+      throw new Error(`Service call failed: ${response.error}`);
     }
 
-    const result = await response.json();
+    const result = response.data;
     log("info", `Service call ${service_name}.${method_name} completed successfully`);
 
     // CRITICAL: Check if this is a suspension response from deno-executor
@@ -295,16 +305,17 @@ async function processServiceCall(stackRun: any) {
       await updateStackRunStatus(stackRun.id, 'suspended_waiting_child');
 
       // Update waiting_on_stack_run_id to track which child we're waiting for
-      const { error: updateError } = await supabase
-        .from('stack_runs')
-        .update({
+      const updateResult = await serviceRegistry.call('database', 'update', [{
+        table: 'stack_runs',
+        query: { id: stackRun.id },
+        update: {
           waiting_on_stack_run_id: suspensionData.stackRunId,
           updated_at: new Date().toISOString()
-        })
-        .eq('id', stackRun.id);
+        }
+      }]);
 
-      if (updateError) {
-        log("error", `Failed to update waiting_on_stack_run_id: ${updateError.message}`);
+      if (!updateResult.success) {
+        log("error", `Failed to update waiting_on_stack_run_id: ${updateResult.error}`);
       } else {
         log("info", `Updated stack run ${stackRun.id} to wait for child ${suspensionData.stackRunId}`);
       }
@@ -321,16 +332,17 @@ async function processServiceCall(stackRun: any) {
       await updateStackRunStatus(stackRun.id, 'suspended_waiting_child');
 
       // Update waiting_on_stack_run_id to track which child we're waiting for
-      const { error: updateError } = await supabase
-        .from('stack_runs')
-        .update({
+      const updateResult = await serviceRegistry.call('database', 'update', [{
+        table: 'stack_runs',
+        query: { id: stackRun.id },
+        update: {
           waiting_on_stack_run_id: result.suspensionData.stackRunId,
           updated_at: new Date().toISOString()
-        })
-        .eq('id', stackRun.id);
+        }
+      }]);
 
-      if (updateError) {
-        log("error", `Failed to update waiting_on_stack_run_id for FlowState: ${updateError.message}`);
+      if (!updateResult.success) {
+        log("error", `Failed to update waiting_on_stack_run_id for FlowState: ${updateResult.error}`);
       } else {
         log("info", `Updated FlowState stack run ${stackRun.id} to wait for child ${result.suspensionData.stackRunId}`);
       }
@@ -356,16 +368,18 @@ async function resumeParentTask(stackRun: any, result: any) {
 
   // CRITICAL FIX: Check if the parent is actually waiting for this specific child
   // Only resume the parent if it's suspended and waiting for this specific stack run
-  const { data: parentStackRun, error: parentError } = await supabase
-    .from('stack_runs')
-    .select('*')
-    .eq('id', stackRun.parent_stack_run_id)
-    .single();
+  const parentResult = await serviceRegistry.call('database', 'select', [{
+    table: 'stack_runs',
+    query: { id: stackRun.parent_stack_run_id },
+    single: true
+  }]);
 
-  if (parentError || !parentStackRun) {
-    log("error", `Failed to get parent stack run ${stackRun.parent_stack_run_id}: ${parentError?.message}`);
+  if (!parentResult.success || !parentResult.data) {
+    log("error", `Failed to get parent stack run ${stackRun.parent_stack_run_id}: ${parentResult.error}`);
     return;
   }
+
+  const parentStackRun = parentResult.data;
 
   // Check if parent is suspended and waiting for this specific child
   if (parentStackRun.status !== 'suspended_waiting_child') {
@@ -405,50 +419,47 @@ async function resumeParentTask(stackRun: any, result: any) {
     await updateStackRunStatus(stackRun.parent_stack_run_id, 'pending_resume');
 
     // Update parent with resume payload
-    const { error } = await supabase
-      .from('stack_runs')
-      .update({
+    const payloadResult = await serviceRegistry.call('database', 'update', [{
+      table: 'stack_runs',
+      query: { id: stackRun.parent_stack_run_id },
+      update: {
         resume_payload: formattedResult,
         updated_at: new Date().toISOString()
-      })
-      .eq('id', stackRun.parent_stack_run_id);
+      }
+    }]);
 
-    if (error) throw new Error(`Failed to set resume payload: ${error.message}`);
+    if (!payloadResult.success) throw new Error(`Failed to set resume payload: ${payloadResult.error}`);
 
-    // Call deno-executor to resume the parent task
-    const resumeResponse = await fetch(`${SUPABASE_URL}/functions/v1/deno-executor/resume`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${SERVICE_ROLE_KEY}`
-      },
-      body: JSON.stringify({
-        stackRunIdToResume: stackRun.parent_stack_run_id,
-        resultToInject: formattedResult
-      })
+    // Call deno-executor to resume the parent task using service registry
+    const resumeResult = await serviceRegistry.call('deno-executor', 'resume', [
+      stackRun.parent_stack_run_id,
+      formattedResult
+    ], {
+      serviceName: 'deno-executor',
+      methodName: 'resume',
+      taskRunId: stackRun.parent_task_run_id?.toString(),
+      stackRunId: stackRun.parent_stack_run_id.toString()
     });
 
-    if (!resumeResponse.ok) {
-      throw new Error(`Failed to resume parent: ${resumeResponse.status} - ${await resumeResponse.text()}`);
+    if (!resumeResult.success) {
+      throw new Error(`Failed to resume parent: ${resumeResult.error}`);
     }
+    log("info", `Parent task ${stackRun.parent_stack_run_id} resumed successfully`);
 
-    const resumeResult = await resumeResponse.json();
-    log("info", `Parent task ${stackRun.parent_stack_run_id} resumed successfully with status: ${resumeResult.status}`);
-
-    // Handle different resume statuses including FlowState states
-    if (resumeResult.status === 'completed') {
-      await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.result);
-    } else if (resumeResult.status === 'error') {
-      await updateStackRunStatus(stackRun.parent_stack_run_id, 'failed', null, resumeResult.error);
-    } else if (resumeResult.status === 'paused') {
-      // FlowState task paused again - this is normal behavior
-      log("info", `Parent task ${stackRun.parent_stack_run_id} paused again (FlowState multi-step execution)`);
+    // Handle different resume statuses including service registry response format
+    if (resumeResult.data && resumeResult.data.status === 'completed') {
+      await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.data.result);
+    } else if (resumeResult.data && resumeResult.data.status === 'error') {
+      await updateStackRunStatus(stackRun.parent_stack_run_id, 'failed', null, resumeResult.data.error);
+    } else if (resumeResult.data && resumeResult.data.status === 'paused') {
+      // Task paused again - this is normal behavior
+      log("info", `Parent task ${stackRun.parent_stack_run_id} paused again (multi-step execution)`);
       // The parent is already in the correct suspended state in the database
       // No need to update status here as it's handled by the deno-executor
     } else {
-      log("warn", `Unknown resume status: ${resumeResult.status} for parent task ${stackRun.parent_stack_run_id}`);
+      log("warn", `Unknown resume result for parent task ${stackRun.parent_stack_run_id}`);
       // Update with whatever result we got
-      await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.result);
+      await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.data);
     }
 
     // Note: No need to trigger next processing here since the resumed task
@@ -490,11 +501,14 @@ async function processStackRunInternal(stackRunId: number): Promise<boolean> {
 
     if (stackRun.parent_stack_run_id) {
       // This is a child stack run - check if it can be processed
-      const { data: parentStackRun } = await supabase
-        .from('stack_runs')
-        .select('status, waiting_on_stack_run_id')
-        .eq('id', stackRun.parent_stack_run_id)
-        .single();
+      const parentResult = await serviceRegistry.call('database', 'select', [{
+        table: 'stack_runs',
+        query: { id: stackRun.parent_stack_run_id },
+        select: ['status', 'waiting_on_stack_run_id'],
+        single: true
+      }]);
+
+      const parentStackRun = parentResult.success ? parentResult.data : null;
 
       if (parentStackRun) {
         // Allow child to process if:
@@ -566,11 +580,14 @@ async function processStackRunInternal(stackRunId: number): Promise<boolean> {
     } finally {
       // Only unlock if we actually acquired a lock and not suspended
       if (!bypassedLock) {
-        const { data: currentStackRun } = await supabase
-          .from('stack_runs')
-          .select('status')
-          .eq('id', stackRunId)
-          .single();
+        const currentResult = await serviceRegistry.call('database', 'select', [{
+          table: 'stack_runs',
+          query: { id: stackRunId },
+          select: ['status'],
+          single: true
+        }]);
+
+        const currentStackRun = currentResult.success ? currentResult.data : null;
 
         if (currentStackRun && currentStackRun.status !== 'suspended_waiting_child') {
           await unlockTaskChain(taskRunId);
@@ -625,15 +642,18 @@ async function getNextPendingStackRun() {
   // CRITICAL: Only process stack runs that don't have pending dependencies
   // This ensures we maintain the serial execution order from the original task code
 
-  const { data, error } = await supabase
-    .from('stack_runs')
-    .select('id, parent_task_run_id, parent_stack_run_id, created_at')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true });
+  const result = await serviceRegistry.call('database', 'select', [{
+    table: 'stack_runs',
+    query: { status: 'pending' },
+    select: ['id', 'parent_task_run_id', 'parent_stack_run_id', 'created_at'],
+    order: { created_at: 'asc' }
+  }]);
 
-  if (error) {
-    throw new Error(`Failed to get pending stack runs: ${error.message}`);
+  if (!result.success) {
+    throw new Error(`Failed to get pending stack runs: ${result.error}`);
   }
+
+  const data = result.data;
 
   if (!data || data.length === 0) {
     return null;
@@ -643,17 +663,22 @@ async function getNextPendingStackRun() {
   for (const stackRun of data) {
     // Check if this stack run has any pending siblings that were created before it
     // (indicating they should be processed first to maintain serial order)
-    const { data: pendingSiblings, error: siblingsError } = await supabase
-      .from('stack_runs')
-      .select('id')
-      .eq('parent_task_run_id', stackRun.parent_task_run_id)
-      .eq('status', 'pending')
-      .lt('created_at', stackRun.created_at);
+    const siblingsResult = await serviceRegistry.call('database', 'select', [{
+      table: 'stack_runs',
+      query: {
+        parent_task_run_id: stackRun.parent_task_run_id,
+        status: 'pending'
+      },
+      filter: { created_at: { lt: stackRun.created_at } },
+      select: ['id']
+    }]);
 
-    if (siblingsError) {
-      log("error", `Failed to check pending siblings: ${siblingsError.message}`);
+    if (!siblingsResult.success) {
+      log("error", `Failed to check pending siblings: ${siblingsResult.error}`);
       continue;
     }
+
+    const pendingSiblings = siblingsResult.data;
 
     // If no pending siblings created before this one, it's safe to process
     if (!pendingSiblings || pendingSiblings.length === 0) {

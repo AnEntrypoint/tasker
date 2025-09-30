@@ -1,23 +1,10 @@
 import { jsonResponse, formatErrorResponse, formatLogMessage } from "../utils/response-formatter.ts";
-import { fetchTaskFromDatabase, supabaseClient } from "../services/database.ts";
+import { fetchTaskFromDatabase, database, type TaskFunction } from "../services/database.ts";
 import { generateModuleCode } from "../services/module-generator.ts";
-import { config } from "https://deno.land/x/dotenv@v3.2.2/mod.ts";
+import { createServiceRoleClient } from "../../_shared/database-service.ts";
 
-config({ export: true });
-
-const supabaseUrlEnv = Deno.env.get('SUPABASE_URL') || '';
-// If the URL is the edge functions URL, use the REST API URL instead for local dev
-const SUPABASE_URL = (supabaseUrlEnv.includes('127.0.0.1:8000') || supabaseUrlEnv.includes('kong:8000'))
-    ? 'http://localhost:54321' 
-    : (supabaseUrlEnv || '');
-const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-
-// ---> Validate critical environment variables
-if (!SUPABASE_URL) throw new Error('Missing required environment variable: SUPABASE_URL');
-if (!SUPABASE_ANON_KEY) throw new Error('Missing required environment variable: SUPABASE_ANON_KEY');
-if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error('Missing required environment variable: SUPABASE_SERVICE_ROLE_KEY');
-// <--- END Validate
+// Get supabase client from unified database service
+const supabaseClient = createServiceRoleClient();
 
 /**
  * Task interface representing a task in the database

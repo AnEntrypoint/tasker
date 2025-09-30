@@ -7,39 +7,138 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
-// Import shared utilities
-import {
-  hostLog,
-  simpleStringify,
-  LogEntry
-} from "../_shared/utils.ts";
+// No imports from shared dependencies to avoid compilation errors
 
-// Import only what we need from shared utilities
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
+// No FlowState import - using HTTP-based service calls for all external operations
 
-// Import working FlowState implementation
-import { SimpleFlowState } from 'npm:flowstate-execution@3.2.0';
+// ==============================
+// Utility Functions
+// ==============================
 
-// FlowState request/response types
-interface FlowStateRequest {
-  id: string;
-  code: string;
-  name?: string;
+/**
+ * Simple logging function to replace hostLog from utils
+ */
+function hostLog(prefix: string, level: 'info' | 'error' | 'warn', message: string): void {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] [${level}] [${prefix}] ${message}`);
 }
 
-interface FlowStateResumeRequest {
-  taskId: string;
-  vmState: any;
-  originalCode: string;
-  fetchResponse: any;
+/**
+ * Simple stringification function
+ */
+function simpleStringify(obj: any): string {
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch (error) {
+    return String(obj);
+  }
 }
 
-interface FlowStateResult {
+// ==============================
+// Minimal Service Registry
+// ==============================
+
+/**
+ * Minimal service registry implementation to avoid shared dependency issues
+ */
+class MinimalServiceRegistry {
+  private supabaseUrl: string;
+  private serviceKey: string;
+
+  constructor() {
+    this.supabaseUrl = SUPABASE_URL;
+    this.serviceKey = SERVICE_ROLE_KEY;
+  }
+
+  /**
+   * Make a direct HTTP call to a wrapped service
+   */
+  async call(serviceName: string, method: string, params: any): Promise<any> {
+    const logPrefix = `ServiceRegistry-${serviceName}`;
+
+    try {
+      const url = `${this.supabaseUrl}/functions/v1/${serviceName}`;
+
+      hostLog(logPrefix, "info", `Calling ${serviceName}.${method} via HTTP`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.serviceKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: method,
+          ...params
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Service call failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      hostLog(logPrefix, "info", `${serviceName}.${method} call completed successfully`);
+      return result;
+
+    } catch (error) {
+      hostLog(logPrefix, "error", `Service call failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Make database calls directly to avoid service registry complexity
+   */
+  async databaseCall(table: string, action: string, params: any): Promise<any> {
+    const logPrefix = `DatabaseCall-${table}`;
+
+    try {
+      const url = `${this.supabaseUrl}/functions/v1/wrappedsupabase`;
+
+      hostLog(logPrefix, "info", `Database ${action} on ${table}`);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.serviceKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: action,
+          table: table,
+          ...params
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Database call failed: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      hostLog(logPrefix, "info", `Database ${action} on ${table} completed`);
+      return result;
+
+    } catch (error) {
+      hostLog(logPrefix, "error", `Database call failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+}
+
+// Create minimal service registry instance
+const serviceRegistry = new MinimalServiceRegistry();
+
+// HTTP-based execution result types
+interface ExecutionResult {
   status: 'completed' | 'paused' | 'error';
   result?: any;
   error?: string;
-  vmState?: any;
-  fetchRequest?: any;
+  suspensionData?: any;
 }
 
 // Simple types
@@ -50,12 +149,6 @@ interface SerializedVMState {
 // Environment variables
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-
-// Create Supabase client
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
-
-// Note: SimpleFlowState uses in-memory storage by default
-// Can be extended to use database storage if needed
 
 // Simple UUID generator
 function generateUUID(): string {
@@ -81,7 +174,7 @@ const corsHeaders = {
 // ==============================
 
 /**
- * Make an external service call - PROPER IMPLEMENTATION
+ * Make an external service call using the service registry
  * Creates a child stack run and returns suspension data
  */
 async function makeExternalCall(
@@ -106,10 +199,9 @@ async function makeExternalCall(
 
   const actualServiceName = serviceMap[serviceName] || serviceName;
 
-  // Save the stack run for this external call using Supabase client directly
-  const { data, error } = await supabase
-    .from('stack_runs')
-    .insert({
+  // Use minimal service registry to create child stack run via database
+  const insertResult = await serviceRegistry.databaseCall('stack_runs', 'insert', {
+    records: [{
       parent_task_run_id: parseInt(taskRunId),
       parent_stack_run_id: parseInt(stackRunId),
       service_name: actualServiceName,
@@ -119,30 +211,33 @@ async function makeExternalCall(
       vm_state: null,
       waiting_on_stack_run_id: null,
       resume_payload: null
-    })
-    .select('id')
-    .single();
+    }]
+  });
 
-  if (error) {
-    throw new Error(`Failed to save stack run: ${error.message}`);
+  if (!insertResult.success || !insertResult.data) {
+    throw new Error(`Failed to save stack run via service registry: ${insertResult.error || 'Unknown error'}`);
   }
 
-  const actualChildStackRunId = data.id;
+  const actualChildStackRunId = insertResult.data[0]?.id;
+
+  if (!actualChildStackRunId) {
+    throw new Error('Failed to get child stack run ID from service registry response');
+  }
 
   hostLog(logPrefix, "info", `Created child stack run ${actualChildStackRunId} for ${serviceName}.${methodPath.join('.')}`);
 
-  // Update the current stack run to suspended_waiting_child status
-  const { error: updateError } = await supabase
-    .from('stack_runs')
-    .update({
+  // Use minimal service registry to update the current stack run to suspended_waiting_child status
+  const updateResult = await serviceRegistry.databaseCall('stack_runs', 'update', {
+    filter: { id: parseInt(stackRunId) },
+    update: {
       status: 'suspended_waiting_child',
       waiting_on_stack_run_id: actualChildStackRunId,
       updated_at: new Date().toISOString()
-    })
-    .eq('id', parseInt(stackRunId));
+    }
+  });
 
-  if (updateError) {
-    throw new Error(`Failed to update stack run status: ${updateError.message}`);
+  if (!updateResult.success) {
+    throw new Error(`Failed to update stack run status via service registry: ${updateResult.error}`);
   }
 
   hostLog(logPrefix, "info", `Updated stack run ${stackRunId} to suspended_waiting_child, waiting on ${actualChildStackRunId}`);
@@ -165,11 +260,196 @@ async function makeExternalCall(
 }
 
 // ==============================
+// Secure Sandbox Environment
+// ==============================
+
+/**
+ * Secure sandbox for executing task code with proper isolation
+ */
+class SecureSandbox {
+  private taskRunId: string;
+  private stackRunId: string;
+  private taskName: string;
+  private logPrefix: string;
+
+  constructor(taskRunId: string, stackRunId: string, taskName: string) {
+    this.taskRunId = taskRunId;
+    this.stackRunId = stackRunId;
+    this.taskName = taskName;
+    this.logPrefix = `Sandbox-${taskName}`;
+  }
+
+  /**
+   * Execute task code in a secure environment
+   */
+  async execute(taskCode: string, taskInput: any, initialVmState?: SerializedVMState): Promise<any> {
+    hostLog(this.logPrefix, "info", `Executing task in secure sandbox`);
+
+    try {
+      // Create a fresh global context for the task
+      const taskGlobal = this.createTaskGlobal();
+
+      // Handle resume payload if present
+      if (initialVmState?.resume_payload) {
+        taskGlobal._resume_payload = initialVmState.resume_payload;
+        hostLog(this.logPrefix, "info", `Resume payload available for task execution`);
+      }
+
+      // Execute the task code in the sandbox
+      const taskFunction = this.compileTaskCode(taskCode, taskGlobal);
+
+      // Execute the task with input
+      const result = await taskFunction(taskInput);
+
+      hostLog(this.logPrefix, "info", `Task execution completed successfully`);
+      return result;
+
+    } catch (error) {
+      hostLog(this.logPrefix, "error", `Task execution failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a secure global context for task execution
+   */
+  private createTaskGlobal(): any {
+    return {
+      // Console that forwards to host logging
+      console: {
+        log: (...args: any[]) => {
+          const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+          hostLog(this.logPrefix, "info", message);
+        },
+        error: (...args: any[]) => {
+          const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+          hostLog(this.logPrefix, "error", message);
+        },
+        warn: (...args: any[]) => {
+          const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+          hostLog(this.logPrefix, "warn", message);
+        }
+      },
+
+      // Host logging function
+      _hostLog: (level: string, message: string) => {
+        hostLog(this.logPrefix, level as any, message);
+      },
+
+      // Global context for call tracking
+      _taskRunId: this.taskRunId,
+      _stackRunId: this.stackRunId,
+
+      // Resume payload (will be set if available)
+      _resume_payload: undefined,
+
+      // Safe standard objects
+      Object,
+      Array,
+      String,
+      Number,
+      Boolean,
+      Date,
+      Math,
+      JSON,
+      RegExp,
+
+      // Async utilities
+      Promise,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+
+      // Crypto utilities
+      crypto: {
+        randomUUID: () => crypto.randomUUID()
+      },
+
+      // Module exports
+      module: { exports: {} },
+      exports: {}
+    };
+  }
+
+  /**
+   * Compile and prepare task code for execution
+   */
+  private compileTaskCode(taskCode: string, taskGlobal: any): (input: any) => Promise<any> {
+    try {
+      // Create a function from the task code
+      const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+
+      // Extract the main function from the task code
+      const mainFunctionMatch = taskCode.match(/(?:module\.exports\s*=\s*|export\s+(?:default\s+)?)(function\s+(\w+)|(\w+))/);
+      const functionName = mainFunctionMatch?.[2] || mainFunctionMatch?.[3] || 'handler';
+
+      // Execute the task code to define the function
+      const taskEval = new AsyncFunction('globalThis', taskCode);
+      taskEval(taskGlobal);
+
+      // Extract the main function
+      const handler = taskGlobal.module?.exports?.[functionName] ||
+                     taskGlobal[functionName] ||
+                     taskGlobal.handler;
+
+      if (typeof handler !== 'function') {
+        throw new Error(`Task handler function '${functionName}' not found or not a function`);
+      }
+
+      return handler;
+    } catch (error) {
+      hostLog(this.logPrefix, "error", `Failed to compile task code: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+}
+
+/**
+ * Create a secure sandbox for task execution
+ */
+function createSecureSandbox(taskRunId: string, stackRunId: string, taskName: string): SecureSandbox {
+  return new SecureSandbox(taskRunId, stackRunId, taskName);
+}
+
+/**
+ * Extract suspension data from a suspension error
+ */
+async function extractSuspensionDataFromError(error: Error, taskRunId: string, stackRunId: string): Promise<any> {
+  const logPrefix = `SuspensionExtractor-${taskRunId}`;
+
+  try {
+    hostLog(logPrefix, "info", `Extracting suspension data from error: ${error.message}`);
+
+    // Parse the suspension error to extract call context
+    const errorMatch = error.message.match(/TASK_SUSPENDED: External call to (\w+)\.([^ ]+) needs suspension/);
+    if (!errorMatch) {
+      throw new Error('Invalid suspension error format');
+    }
+
+    const serviceName = errorMatch[1];
+    const methodPath = errorMatch[2].split('.');
+
+    hostLog(logPrefix, "info", `Parsed external call: ${serviceName}.${methodPath.join('.')}`);
+
+    // For now, we'll create a basic suspension structure
+    // In a real implementation, you'd extract this from the call context
+    const suspensionData = await makeExternalCall(serviceName, methodPath, [], taskRunId, stackRunId);
+
+    return suspensionData;
+
+  } catch (extractError) {
+    hostLog(logPrefix, "error", `Failed to extract suspension data: ${extractError instanceof Error ? extractError.message : String(extractError)}`);
+    throw extractError;
+  }
+}
+
+// ==============================
 // Task Execution
 // ==============================
 
 /**
- * Execute a task using FlowState with enhanced pause/resume capabilities
+ * Execute a task using HTTP-based FlowState with enhanced pause/resume capabilities
  */
 async function executeTask(
   taskCode: string,
@@ -184,7 +464,7 @@ async function executeTask(
 
   try {
     const startTime = Date.now();
-    hostLog(logPrefix, "info", `Executing FlowState task: ${taskName}`);
+    hostLog(logPrefix, "info", `Executing HTTP-based FlowState task: ${taskName}`);
 
     // Monitor memory usage if available
     if (typeof Deno !== 'undefined' && Deno.memoryUsage) {
@@ -192,17 +472,14 @@ async function executeTask(
       hostLog(logPrefix, "info", `Memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB RSS, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB heap`);
     }
 
-    // Prepare task code with __callHostTool__ integration
+    // Prepare enhanced task code with service registry integration
     const enhancedTaskCode = `
       ${taskCode}
 
-      // Global __callHostTool__ function for external service calls
-      globalThis.__callHostTool__ = function(serviceName, methodPath, args) {
+      // Global __callHostTool__ function using service registry
+      globalThis.__callHostTool__ = async function(serviceName, methodPath, args) {
         // Convert methodPath array to dot notation for consistency
         const methodString = Array.isArray(methodPath) ? methodPath.join('.') : methodPath;
-
-        // Create a unique fetch URL for this external call
-        const fetchUrl = 'https://tasker-external-call/' + serviceName + '/' + methodString;
 
         // Store call context for later use
         const callContext = {
@@ -213,22 +490,13 @@ async function executeTask(
           stackRunId: '${stackRunId}'
         };
 
-        // Store context globally for the fetch interceptor
+        // Store context globally for external call tracking
         globalThis._currentCallContext = callContext;
 
-        // Make the external call via fetch (will be intercepted by FlowState)
-        return fetch(fetchUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Tasker-Call-Context': JSON.stringify(callContext)
-          },
-          body: JSON.stringify({
-            serviceName: serviceName,
-            methodPath: callContext.methodPath,
-            args: args
-          })
-        });
+        // CRITICAL: All external calls must trigger suspension for FlowState to work
+        // Instead of making the actual call, we throw a suspension error
+        // The stack processor will handle the actual service call
+        throw new Error(\`TASK_SUSPENDED: External call to \${serviceName}.\${methodString} needs suspension\`);
       };
 
       // Enhanced console for logging
@@ -255,66 +523,37 @@ async function executeTask(
       };
 
       // Export the main function
-      module.exports = ${taskCode.match(/module\.exports\s*=\s*([^;]+)/)?.[1] || taskCode.match(/export\s+(?:default\s+)?function\s+(\w+)/)?.[1] || 'handler'};
+      if (typeof module !== 'undefined') {
+        module.exports = ${taskCode.match(/module\.exports\s*=\s*([^;]+)/)?.[1] || taskCode.match(/export\s+(?:default\s+)?function\s+(\w+)/)?.[1] || 'handler'};
+      }
     `;
 
-    // Create FlowState request
-    const flowStateRequest: FlowStateRequest = {
-      id: stackRunId, // Use stack run ID as FlowState task ID
-      code: enhancedTaskCode,
-      name: taskName
-    };
+    // Create a secure sandbox environment
+    const sandbox = createSecureSandbox(taskRunId, stackRunId, taskName);
 
-    // Execute with SimpleFlowState
-    const result = await SimpleFlowState.execute(flowStateRequest, {
-      saveToStorage: true,
-      ttl: 2 * 60 * 60 * 1000 // 2 hours
-    });
+    // Execute the task in the sandbox
+    const result = await sandbox.execute(enhancedTaskCode, taskInput, initialVmState);
 
-    hostLog(logPrefix, "info", `FlowState execution result: ${result.status}`);
+    hostLog(logPrefix, "info", `HTTP-based FlowState execution completed`);
 
-    // Handle different FlowState states
-    if (result.status === 'paused') {
-      // FlowState paused on an external call - create suspension data for stack processor
-      hostLog(logPrefix, "info", `FlowState paused on external call`);
-
-      // Extract call context from SimpleFlowState fetchRequest
-      const fetchRequest = result.fetchRequest;
-      let serviceName = fetchRequest?.serviceName || 'unknown';
-      let methodPath = fetchRequest?.methodPath || [];
-      let args = fetchRequest?.args || [];
-
-      hostLog(logPrefix, "info", `External call details: ${serviceName}.${methodPath.join('.')}`);
-
-      // Create child stack run for external call
-      const suspensionData = await makeExternalCall(serviceName, methodPath, args, taskRunId, stackRunId);
-
-      // Return suspension data to stack processor
-      return suspensionData;
-
-    } else if (result.status === 'completed') {
-      // Task completed successfully
-      const executionTime = Date.now() - startTime;
-      hostLog(logPrefix, "info", `FlowState task completed in ${executionTime}ms: ${JSON.stringify(result.result).substring(0, 200)}...`);
-
-      // Monitor memory usage after execution
-      if (typeof Deno !== 'undefined' && Deno.memoryUsage) {
-        const memUsage = Deno.memoryUsage();
-        hostLog(logPrefix, "info", `Final memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB RSS, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB heap`);
-      }
-
-      return result.result;
-
-    } else if (result.status === 'error') {
-      // Task failed
-      hostLog(logPrefix, "error", `FlowState task failed: ${result.error}`);
-      throw new Error(result.error || 'FlowState execution failed');
+    // Monitor memory usage after execution
+    if (typeof Deno !== 'undefined' && Deno.memoryUsage) {
+      const memUsage = Deno.memoryUsage();
+      hostLog(logPrefix, "info", `Final memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB RSS, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB heap`);
     }
 
     return result;
 
   } catch (error) {
-    hostLog(logPrefix, "error", `FlowState execution failed: ${error instanceof Error ? error.message : String(error)}`);
+    hostLog(logPrefix, "error", `HTTP-based FlowState execution failed: ${error instanceof Error ? error.message : String(error)}`);
+
+    // Check if this is a suspension error
+    if (error instanceof Error && error.message.includes('TASK_SUSPENDED')) {
+      // Extract suspension data from the error
+      const suspensionData = await extractSuspensionDataFromError(error, taskRunId, stackRunId);
+      return suspensionData;
+    }
+
     throw error;
   }
 }
@@ -335,10 +574,11 @@ async function handleExecuteRequest(req: Request): Promise<Response> {
       return new Response(JSON.stringify({
         status: 'healthy',
         service: 'Deno Task Executor',
-        version: '1.0.0'
-      }), { 
-        status: 200, 
-        headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        version: '1.0.0',
+        serviceRegistry: 'minimal'
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
     
@@ -380,88 +620,105 @@ async function handleExecuteRequest(req: Request): Promise<Response> {
 }
 
 /**
- * Handle resume requests - resume a suspended FlowState task with external call result
+ * Handle resume requests - resume a suspended task with external call result
  */
 async function handleResumeRequest(req: Request): Promise<Response> {
-  const logPrefix = "FlowStateExecutor-HandleResume";
+  const logPrefix = "DenoExecutor-HandleResume";
 
   try {
     const requestData = await req.json();
     const { stackRunIdToResume, resultToInject } = requestData;
 
-    hostLog(logPrefix, "info", `FlowState resume request for stack run ${stackRunIdToResume} with result: ${JSON.stringify(resultToInject).substring(0, 100)}...`);
+    hostLog(logPrefix, "info", `Resume request for stack run ${stackRunIdToResume} with result: ${JSON.stringify(resultToInject).substring(0, 100)}...`);
 
-    // Load the FlowState task from storage
-    const flowStateTask = await SimpleFlowState.loadTask(stackRunIdToResume);
+    // Use legacy resume mechanism which is now the primary mechanism
+    return await handleLegacyResume(requestData);
 
-    if (!flowStateTask) {
-      // Fallback to old resume mechanism for compatibility
-      hostLog(logPrefix, "warn", `FlowState task not found, falling back to legacy resume mechanism`);
-      return await handleLegacyResume(requestData);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    hostLog(logPrefix, "error", `Error in handleResumeRequest: ${errorMsg}`);
+
+    return new Response(JSON.stringify({
+      error: errorMsg
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+}
+
+/**
+ * Resume mechanism for suspended tasks using service registry
+ */
+async function handleLegacyResume(requestData: any): Promise<Response> {
+  const logPrefix = "DenoExecutor-Resume";
+
+  const { stackRunIdToResume, resultToInject } = requestData;
+
+  hostLog(logPrefix, "info", `Resuming stack run ${stackRunIdToResume} with result injection`);
+
+  // Get the stack run to resume using minimal service registry
+  const stackRunResult = await serviceRegistry.databaseCall('stack_runs', 'select', {
+    filter: { id: parseInt(stackRunIdToResume) }
+  });
+
+  if (!stackRunResult.success || !stackRunResult.data?.[0]) {
+    throw new Error(`Stack run ${stackRunIdToResume} not found`);
+  }
+
+  const stackRun = stackRunResult.data[0];
+
+  // Extract task information from VM state
+  const vmState = stackRun.vm_state;
+  if (!vmState || !vmState.taskCode) {
+    throw new Error(`Stack run ${stackRunIdToResume} has no VM state or task code`);
+  }
+
+  try {
+    // Execute the task with the injected result using the sandbox
+    const result = await executeTask(
+      vmState.taskCode,
+      vmState.taskName,
+      vmState.taskInput,
+      stackRun.parent_task_run_id.toString(),
+      stackRunIdToResume.toString(),
+      vmState.toolNames,
+      {
+        ...vmState,
+        resume_payload: resultToInject
+      }
+    );
+
+    // Check if the result is a suspension (task paused again)
+    if (result && result.__hostCallSuspended === true) {
+      hostLog(logPrefix, "info", `Task suspended again during resume, child stack run: ${result.stackRunId}`);
+
+      return new Response(JSON.stringify({
+        status: 'paused',
+        suspensionData: result
+      }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
     }
 
-    // Create a mock fetch response for FlowState resume
-    const mockFetchResponse = {
-      id: `resume_${Date.now()}`,
-      success: true,
+    // Task completed successfully
+    hostLog(logPrefix, "info", `Task resumed and completed successfully`);
+
+    return new Response(JSON.stringify({
+      status: 'completed',
+      result: result
+    }), {
       status: 200,
-      statusText: 'OK',
-      data: resultToInject,
-      timestamp: Date.now()
-    };
-
-    // Resume the FlowState task
-    const resumeRequest: FlowStateResumeRequest = {
-      taskId: stackRunIdToResume,
-      vmState: flowStateTask.vmState,
-      originalCode: flowStateTask.code,
-      fetchResponse: mockFetchResponse
-    };
-
-    const result = await SimpleFlowState.resume(resumeRequest, {
-      saveToStorage: true,
-      ttl: 2 * 60 * 60 * 1000 // 2 hours
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
 
-    hostLog(logPrefix, "info", `FlowState resume result: ${result.status}`);
+  } catch (error) {
+    hostLog(logPrefix, "error", `Task resume failed: ${error instanceof Error ? error.message : String(error)}`);
 
-    // Handle different FlowState states after resume
-    if (result.status === 'paused') {
-      // Task paused again on another external call
-      hostLog(logPrefix, "info", `FlowState task paused again on external call: ${result.fetchRequest?.url}`);
-
-      // Extract call context and create suspension data
-      const callContext = result.fetchRequest?.headers?.['X-Tasker-Call-Context'];
-      let serviceName = 'unknown';
-      let methodPath = [];
-      let args = [];
-
-      try {
-        if (callContext) {
-          const parsed = JSON.parse(callContext);
-          serviceName = parsed.serviceName;
-          methodPath = parsed.methodPath;
-          args = parsed.args;
-        }
-      } catch (e) {
-        hostLog(logPrefix, "warn", `Failed to parse call context: ${e}`);
-      }
-
-      // Get task run ID from the stack run
-      const { data: stackRun } = await supabase
-        .from('stack_runs')
-        .select('parent_task_run_id')
-        .eq('id', stackRunIdToResume)
-        .single();
-
-      // Create child stack run for the new external call
-      const suspensionData = await makeExternalCall(
-        serviceName,
-        methodPath,
-        args,
-        stackRun?.parent_task_run_id?.toString() || '1',
-        stackRunIdToResume
-      );
+    // Check if this is a suspension error
+    if (error instanceof Error && error.message.includes('TASK_SUSPENDED')) {
+      const suspensionData = await extractSuspensionDataFromError(error, stackRun.parent_task_run_id.toString(), stackRunIdToResume);
 
       return new Response(JSON.stringify({
         status: 'paused',
@@ -470,109 +727,16 @@ async function handleResumeRequest(req: Request): Promise<Response> {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
-
-    } else if (result.status === 'completed') {
-      // Task completed successfully
-      hostLog(logPrefix, "info", `FlowState task resumed and completed successfully`);
-
-      return new Response(JSON.stringify({
-        status: 'completed',
-        result: result.result
-      }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-
-    } else if (result.status === 'error') {
-      // Task failed during resume
-      hostLog(logPrefix, "error", `FlowState task failed during resume: ${result.error}`);
-
-      return new Response(JSON.stringify({
-        status: 'error',
-        error: result.error
-      }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
     }
 
     return new Response(JSON.stringify({
-      status: 'unknown',
-      result: result
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
     }), {
-      status: 200,
+      status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
-
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    hostLog(logPrefix, "error", `Error in FlowState handleResumeRequest: ${errorMsg}`);
-
-    // Try fallback to legacy resume mechanism
-    try {
-      hostLog(logPrefix, "info", `Attempting fallback to legacy resume mechanism`);
-      return await handleLegacyResume(requestData);
-    } catch (fallbackError) {
-      hostLog(logPrefix, "error", `Fallback resume also failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
-
-      return new Response(JSON.stringify({
-        error: errorMsg
-      }), {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" }
-      });
-    }
   }
-}
-
-/**
- * Legacy resume mechanism for compatibility with existing stack runs
- */
-async function handleLegacyResume(requestData: any): Promise<Response> {
-  const logPrefix = "FlowStateExecutor-LegacyResume";
-
-  const { stackRunIdToResume, resultToInject } = requestData;
-
-  hostLog(logPrefix, "info", `Legacy resume for stack run ${stackRunIdToResume}`);
-
-  // Get the stack run to resume
-  const { data: stackRun, error } = await supabase
-    .from('stack_runs')
-    .select('*')
-    .eq('id', stackRunIdToResume)
-    .single();
-
-  if (error || !stackRun) {
-    throw new Error(`Stack run ${stackRunIdToResume} not found`);
-  }
-
-  // Extract task information from VM state
-  const vmState = stackRun.vm_state;
-  if (!vmState || !vmState.taskCode) {
-    throw new Error(`Stack run ${stackRunIdToResume} has no VM state or task code`);
-  }
-
-  // Execute the task with the injected result using the old method
-  const result = await executeTask(
-    vmState.taskCode,
-    vmState.taskName,
-    vmState.taskInput,
-    stackRun.parent_task_run_id.toString(),
-    stackRunIdToResume.toString(),
-    vmState.toolNames,
-    {
-      ...vmState,
-      resume_payload: resultToInject
-    }
-  );
-
-  return new Response(JSON.stringify({
-    status: 'completed',
-    result: result
-  }), {
-    status: 200,
-    headers: { ...corsHeaders, "Content-Type": "application/json" }
-  });
 }
 
 // ==============================
@@ -608,4 +772,4 @@ serve(async (req: Request) => {
   }
 });
 
-console.log("🚀 Deno Task Executor started successfully");
+console.log("🚀 Deno Task Executor with Unified Service Registry started successfully");

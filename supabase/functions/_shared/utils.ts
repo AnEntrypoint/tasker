@@ -1,16 +1,40 @@
-// supabase/functions/_shared/utils.ts
+/**
+ * Unified Utility Functions
+ *
+ * Consolidates common utility functions with standardized naming conventions
+ * and consistent error handling patterns.
+ */
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { hostLog as newHostLog, logger, log, performance, context } from './logging-service.ts';
+import { database, fetchTaskFromDatabase as dbFetchTaskFromDatabase, createServiceRoleClient } from './database-service.ts';
 
 // Shared type definitions
-export type LogEntry = {
-	level: 'debug' | 'info' | 'warn' | 'error' | 'log',
-	message: string,
-	timestamp: string,
-	data?: any
-};
+export interface ILogEntry {
+	level: 'debug' | 'info' | 'warn' | 'error' | 'log';
+	message: string;
+	timestamp: string;
+	data?: any;
+}
 
-// Shared utility functions
+export interface IApiResponse<T = any> {
+	success: boolean;
+	data?: T;
+	error?: string;
+	timestamp: string;
+}
+
+export interface IPaginationOptions {
+	page?: number;
+	limit?: number;
+	offset?: number;
+}
+
+export interface ISortOptions {
+	field?: string;
+	direction?: 'asc' | 'desc';
+}
+
+// String utilities
 export function simpleStringify(object: any): string {
 	try {
 		const seen = new WeakSet();
@@ -23,97 +47,109 @@ export function simpleStringify(object: any): string {
 			}
 			return value;
 		}, 2);
-	} catch (e) {
-		return `[Error stringifying object: ${e instanceof Error ? e.message : String(e)}]`;
+	} catch (error) {
+		return `[Error stringifying object: ${error instanceof Error ? error.message : String(error)}]`;
 	}
 }
 
-export function hostLog(
-	prefix: string,
-	level: LogEntry['level'],
-	message: string,
-	...additionalData: any[]
-): void {
-	// Format the prefix and level consistently
-	const timestamp = new Date().toISOString();
-	const formattedPrefix = prefix ? `[${prefix}]` : '';
-	const formattedLevel = level.toUpperCase();
-	
-	// Only stringify additional data if not empty
-	const dataString = additionalData.length > 0 
-		? additionalData.map(data => 
-			typeof data === 'string' ? data : simpleStringify(data)
-		).join(' ')
-		: '';
-
-	// Create the log string
-	const logString = `${timestamp} ${formattedPrefix} [${formattedLevel}] ${message} ${dataString}`.trim();
-	
-	// Use appropriate console method based on level
-	switch (level) {
-		case 'debug':
-			console.debug(logString);
-			break;
-		case 'info':
-			console.info(logString);
-			break;
-		case 'warn':
-			console.warn(logString);
-			break;
-		case 'error':
-			console.error(logString);
-			break;
-		default:
-			console.log(logString);
+export function sanitizeString(input: string, maxLength: number = 1000): string {
+	if (typeof input !== 'string') {
+		return String(input);
 	}
+	return input.length > maxLength ? input.substring(0, maxLength) + '...' : input;
 }
 
-export async function fetchTaskFromDatabase(
-	supabaseClient: SupabaseClient,
+export function generateCorrelationId(): string {
+	return `corr_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Validation utilities
+export function isValidUuid(uuid: string): boolean {
+	const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+	return uuidRegex.test(uuid);
+}
+
+export function isValidEmail(email: string): boolean {
+	const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+	return emailRegex.test(email);
+}
+
+export function validateRequired(obj: any, requiredFields: string[]): { isValid: boolean; missingFields: string[] } {
+	const missingFields: string[] = [];
+
+	for (const field of requiredFields) {
+		if (!obj || obj[field] === undefined || obj[field] === null || obj[field] === '') {
+			missingFields.push(field);
+		}
+	}
+
+	return {
+		isValid: missingFields.length === 0,
+		missingFields
+	};
+}
+
+// Re-export hostLog from logging service for backward compatibility
+export const hostLog = newHostLog;
+
+// Export logging utilities for convenience
+export { logger, log, performance, context } from './logging-service.ts';
+
+// Database utilities
+export const fetchTaskFromDatabase = async (
+	supabaseClient: any, // Keep for backward compatibility but not used
 	taskIdOrName: string,
 	taskId: string | null = null,
-	log: (message: string) => void = console.log
-): Promise<string | null> {
+	logger: any = log
+): Promise<string | null> => {
 	try {
-		let query = supabaseClient.from('task_functions').select('*');
-		
-		if (taskId && isUuid(taskId)) {
-			query = query.eq('id', taskId);
-			log(`Querying task by ID: ${taskId}`);
-		} else {
-			const searchTerm = taskIdOrName;
-			query = query.eq('name', searchTerm);
-			log(`Querying task by name: ${searchTerm}`);
-		}
-		
-		const { data, error } = await query.limit(1).single();
-		
-		if (error) {
-			log(`Task lookup failed: ${error.message}`);
-			return null;
-		}
-		
-		if (!data) {
-			log(`No task found for ${taskIdOrName}`);
-			return null;
-		}
-		
-		log(`Task found: ${data.name} (id: ${data.id})`);
-		return data.code;
+		const taskFunction = await dbFetchTaskFromDatabase(taskIdOrName, taskId);
+		return taskFunction?.code || null;
 	} catch (error) {
-		log(`Database fetch error: ${error instanceof Error ? error.message : String(error)}`);
+		logger.error(`Database fetch error: ${error instanceof Error ? error.message : String(error)}`, error);
 		return null;
 	}
+};
+
+// Response utilities
+export function createApiResponse<T>(
+	success: boolean,
+	data?: T,
+	error?: string,
+	statusCode: number = 200
+): { response: Response; data: IApiResponse<T> } {
+	const apiData: IApiResponse<T> = {
+		success,
+		data,
+		error,
+		timestamp: new Date().toISOString()
+	};
+
+	const response = new Response(JSON.stringify(apiData), {
+		status: statusCode,
+		headers: {
+			'Content-Type': 'application/json',
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+		}
+	});
+
+	return { response, data: apiData };
 }
 
-export function isUuid(str: string): boolean {
-	const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-	return uuidRegex.test(str);
+export function createSuccessApiResponse<T>(data: T, statusCode: number = 200) {
+	return createApiResponse(true, data, undefined, statusCode);
 }
 
+export function createErrorApiResponse(error: string, statusCode: number = 500) {
+	return createApiResponse(false, undefined, error, statusCode);
+}
+
+// Legacy response functions (deprecated - use createApiResponse instead)
 export function createErrorResponse(
-	message: string, 
-	statusCode: number = 500, 
+	message: string,
+	statusCode: number = 500,
 	details?: any
 ): Response {
 	return new Response(
@@ -135,7 +171,7 @@ export function createErrorResponse(
 }
 
 export function createSuccessResponse(
-	data: any, 
+	data: any,
 	statusCode: number = 200
 ): Response {
 	return new Response(
@@ -155,15 +191,8 @@ export function createSuccessResponse(
 	);
 }
 
-export function getServiceRoleClient(): SupabaseClient {
-	const supabaseUrl = Deno.env.get('SUPABASE_URL');
-	const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-	
-	if (!supabaseUrl || !supabaseServiceKey) {
-		throw new Error('Missing Supabase configuration (URL or Service Role Key)');
-	}
-	
-	return createClient(supabaseUrl, supabaseServiceKey, {
-		auth: { persistSession: false }
-	});
-} 
+// Deprecated alias for backward compatibility
+export const isUuid = isValidUuid;
+
+// Re-export service role client from database service for backward compatibility
+export const getServiceRoleClient = createServiceRoleClient; 

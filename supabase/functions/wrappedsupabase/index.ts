@@ -1,110 +1,185 @@
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
+import { BaseHttpHandler, HttpStatus, createHealthCheckResponse } from "../_shared/http-handler.ts";
+import { config } from "../_shared/config-service.ts";
+import { BaseService, ServiceOperation, ServiceError, ServiceErrorType } from "../_shared/base-service.ts";
 
-// Helper to determine the correct Supabase URL (local vs deployed)
-function getSupabaseUrl(): string {
-  // Try EXT_SUPABASE_URL first, then fall back to SUPABASE_URL
-  const extSupabaseUrl = Deno.env.get('EXT_SUPABASE_URL');
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
+/**
+ * Supabase wrapper service implementation
+ * This provides a proxy interface for Supabase database operations
+ */
+class SupabaseService extends BaseService {
+  private supabaseClient: any;
 
-  if (extSupabaseUrl) {
-    console.log("[wrappedsupabase] Using EXT_SUPABASE_URL:", extSupabaseUrl);
-    return extSupabaseUrl;
-  } else if (supabaseUrl) {
-    console.log("[wrappedsupabase] Using SUPABASE_URL:", supabaseUrl);
-    return supabaseUrl;
-  } else {
-    console.warn("[wrappedsupabase] Neither EXT_SUPABASE_URL nor SUPABASE_URL found in environment. Defaulting to http://127.0.0.1:54321");
-    return 'http://127.0.0.1:54321'; // Default to local development with correct port
+  constructor() {
+    super({
+      name: 'wrappedsupabase',
+      version: '1.0.0',
+      description: 'Supabase database operations wrapper',
+      enableHealthCheck: true,
+      enablePerformanceLogging: true,
+      timeout: 30000,
+      retries: 3
+    });
+
+    this.supabaseClient = this.createSupabaseClient();
+  }
+
+  public getOperations(): string[] {
+    return [
+      'executeQuery',
+      'processChain',
+      'getClient'
+    ];
+  }
+
+  private createSupabaseClient(): any {
+    const targetSupabaseUrl = config.database.url;
+    const serviceRoleKey = config.database.serviceRoleKey;
+
+    if (!targetSupabaseUrl) {
+      throw new ServiceError(
+        ServiceErrorType.CONFIGURATION_ERROR,
+        "Supabase URL not configured correctly",
+        'MISSING_SUPABASE_URL'
+      );
+    }
+
+    if (!serviceRoleKey) {
+      throw new ServiceError(
+        ServiceErrorType.CONFIGURATION_ERROR,
+        "Service Role Key not found",
+        'MISSING_SERVICE_ROLE_KEY'
+      );
+    }
+
+    return createClient(targetSupabaseUrl, serviceRoleKey, {
+      auth: { persistSession: false }
+    });
+  }
+
+  @ServiceOperation('processChain')
+  async processChain(chain: any[]): Promise<any> {
+    return this.executeOperation(
+      'processChain',
+      async () => {
+        if (!Array.isArray(chain) || chain.length === 0) {
+          throw new ServiceError(
+            ServiceErrorType.VALIDATION_ERROR,
+            'Invalid request format - expected chain array',
+            'INVALID_CHAIN_FORMAT',
+            { chain }
+          );
+        }
+
+        let result = this.supabaseClient;
+
+        // Process the chain manually
+        for (const step of chain) {
+          if (step.property && typeof result[step.property] === 'function') {
+            const args = step.args || [];
+            result = result[step.property](...args);
+          } else {
+            throw new ServiceError(
+              ServiceErrorType.VALIDATION_ERROR,
+              `Method ${step.property} not found or not a function`,
+              'METHOD_NOT_FOUND',
+              { method: step.property }
+            );
+          }
+        }
+
+        // Execute the final result if it's a promise
+        return await result;
+      },
+      { chainLength: chain.length }
+    );
+  }
+
+  protected async performHealthCheck(): Promise<IHealthCheckResult> {
+    const baseHealth = await super.performHealthCheck();
+
+    try {
+      // Test database connectivity
+      const result = await this.supabaseClient
+        .from('task_functions')
+        .select('id')
+        .limit(1);
+
+      if (result.error) {
+        throw new Error(`Database test query failed: ${result.error.message}`);
+      }
+
+      baseHealth.details!.database = {
+        healthy: true,
+        message: 'Database connectivity verified'
+      };
+    } catch (error) {
+      baseHealth.status = 'unhealthy';
+      baseHealth.details!.database = {
+        healthy: false,
+        error: (error as Error).message
+      };
+      baseHealth.error = `Database health check failed: ${(error as Error).message}`;
+    }
+
+    return baseHealth;
   }
 }
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-task-id, x-execution-id, x-request-id",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Credentials": "true"
-};
+// Create supabase service instance
+const supabaseService = new SupabaseService();
 
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
+// Supabase HTTP Handler
+class WrappedSupabaseHandler extends BaseHttpHandler {
+  protected async routeHandler(req: Request, url: URL): Promise<Response> {
+    const path = url.pathname;
 
-  const path = new URL(req.url).pathname;
-
-  try {
+    // Enhanced health check endpoint
     if (req.method === "GET" && path === "/health") {
-      return new Response(JSON.stringify({ status: "ok" }), { status: 200, headers: corsHeaders });
-    }
-
-    // --- Get Target URL and Auth Token FROM ENVIRONMENT ---
-    const targetSupabaseUrl = getSupabaseUrl();
-
-    // Try EXT_SUPABASE_SERVICE_ROLE_KEY first, then fall back to SUPABASE_SERVICE_ROLE_KEY
-    const extServiceRoleKey = Deno.env.get('EXT_SUPABASE_SERVICE_ROLE_KEY');
-    const serviceRoleKey = extServiceRoleKey || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-
-    // Validate environment variables
-    if (!targetSupabaseUrl) {
-        console.error("[wrappedsupabase] Error: Neither EXT_SUPABASE_URL nor SUPABASE_URL env var is set.");
-        throw new Error("Supabase URL environment variable not configured correctly.");
-    }
-    if (!serviceRoleKey) {
-        console.error("[wrappedsupabase] Error: Neither EXT_SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_SERVICE_ROLE_KEY env var is set.");
-        throw new Error("Supabase Service Role Key environment variable not found.");
-    }
-
-    // Initialize client using environment variables
-    console.log(`[wrappedsupabase] Initializing client for URL: ${targetSupabaseUrl}`);
-    const supabaseClient = createClient(targetSupabaseUrl, serviceRoleKey, {
-       auth: { persistSession: false } // Recommended for server-side clients
-    });
-
-    // Handle POST requests with simple manual processing instead of processSdkRequest
-    if (req.method === 'POST') {
-      const body = await req.json();
-      console.log(`[wrappedsupabase] Processing request:`, body);
-      
-      if (body.chain && Array.isArray(body.chain)) {
-        let result = supabaseClient;
-        
-        // Process the chain manually
-        for (const step of body.chain) {
-          if (step.property && typeof result[step.property] === 'function') {
-            const args = step.args || [];
-            console.log(`[wrappedsupabase] Calling ${step.property} with args:`, args);
-            result = result[step.property](...args);
-          } else {
-            throw new Error(`Method ${step.property} not found or not a function`);
-          }
-        }
-        
-        // Execute the final result if it's a promise
-        const finalResult = await result;
-        console.log(`[wrappedsupabase] Request processed successfully`);
-        
-        return new Response(JSON.stringify(finalResult), {
-          status: 200,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      try {
+        const healthCheck = await supabaseService.getHealthCheck();
+        return createHealthCheckResponse("wrappedsupabase", healthCheck.status, healthCheck.details);
+      } catch (error) {
+        return createHealthCheckResponse("wrappedsupabase", "unhealthy", {
+          error: (error as Error).message
         });
-      } else {
-        throw new Error('Invalid request format - expected chain array');
       }
     }
 
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: corsHeaders
-    });
-  } catch (error) {
-    console.error("[wrappedsupabase] Handler error:", error);
-    return new Response(
-      JSON.stringify({
-        success: false,
-        error: error instanceof Error ? error.message : String(error)
-      }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    // Handle POST requests with chain processing
+    if (req.method === 'POST') {
+      const body = await this.parseRequestBody(req);
+
+      try {
+        if (body.chain && Array.isArray(body.chain)) {
+          const result = await supabaseService.processChain(body.chain);
+          return this.createSuccessResponse(result);
+        } else {
+          throw new ServiceError(
+            ServiceErrorType.VALIDATION_ERROR,
+            'Invalid request format - expected chain array',
+            'INVALID_CHAIN_FORMAT',
+            { body }
+          );
+        }
+      } catch (error) {
+        const err = error instanceof ServiceError ? error : new ServiceError(
+          ServiceErrorType.INTERNAL_ERROR,
+          (error as Error).message,
+          'PROCESSING_ERROR'
+        );
+        return this.createErrorResponse(
+          err.message,
+          err.statusCode || HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+    }
+
+    return this.createErrorResponse("Method not allowed", HttpStatus.METHOD_NOT_ALLOWED);
   }
-});
+}
+
+// Create handler instance and start serving
+const wrappedSupabaseHandler = new WrappedSupabaseHandler();
+serve((req) => wrappedSupabaseHandler.handle(req));
