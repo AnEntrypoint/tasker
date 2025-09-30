@@ -17,16 +17,30 @@ import {
 // Import only what we need from shared utilities
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.38.4';
 
-// Import FlowState from CommonJS library
-import {
-  FlowStateEdge,
-  type FlowStateRequest,
-  type FlowStateResumeRequest,
-  type FlowStateResult
-} from '../../../flowstate/lib/edge-functions.cjs';
+// Import working FlowState implementation
+import { SimpleFlowState } from 'npm:flowstate-execution@3.2.0';
 
-// Import custom storage adapter
-import { supabaseFlowStateStorage } from './flowstate-storage.ts';
+// FlowState request/response types
+interface FlowStateRequest {
+  id: string;
+  code: string;
+  name?: string;
+}
+
+interface FlowStateResumeRequest {
+  taskId: string;
+  vmState: any;
+  originalCode: string;
+  fetchResponse: any;
+}
+
+interface FlowStateResult {
+  status: 'completed' | 'paused' | 'error';
+  result?: any;
+  error?: string;
+  vmState?: any;
+  fetchRequest?: any;
+}
 
 // Simple types
 interface SerializedVMState {
@@ -40,8 +54,8 @@ const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 // Create Supabase client
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-// Set FlowState default storage
-FlowStateEdge.setDefaultStorage(supabaseFlowStateStorage);
+// Note: SimpleFlowState uses in-memory storage by default
+// Can be extended to use database storage if needed
 
 // Simple UUID generator
 function generateUUID(): string {
@@ -251,8 +265,8 @@ async function executeTask(
       name: taskName
     };
 
-    // Execute with FlowState
-    const result = await FlowStateEdge.execute(flowStateRequest, {
+    // Execute with SimpleFlowState
+    const result = await SimpleFlowState.execute(flowStateRequest, {
       saveToStorage: true,
       ttl: 2 * 60 * 60 * 1000 // 2 hours
     });
@@ -262,24 +276,15 @@ async function executeTask(
     // Handle different FlowState states
     if (result.status === 'paused') {
       // FlowState paused on an external call - create suspension data for stack processor
-      hostLog(logPrefix, "info", `FlowState paused on external call: ${result.fetchRequest?.url}`);
+      hostLog(logPrefix, "info", `FlowState paused on external call`);
 
-      // Extract call context from the fetch request
-      const callContext = result.fetchRequest?.headers?.['X-Tasker-Call-Context'];
-      let serviceName = 'unknown';
-      let methodPath = [];
-      let args = [];
+      // Extract call context from SimpleFlowState fetchRequest
+      const fetchRequest = result.fetchRequest;
+      let serviceName = fetchRequest?.serviceName || 'unknown';
+      let methodPath = fetchRequest?.methodPath || [];
+      let args = fetchRequest?.args || [];
 
-      try {
-        if (callContext) {
-          const parsed = JSON.parse(callContext);
-          serviceName = parsed.serviceName;
-          methodPath = parsed.methodPath;
-          args = parsed.args;
-        }
-      } catch (e) {
-        hostLog(logPrefix, "warn", `Failed to parse call context: ${e}`);
-      }
+      hostLog(logPrefix, "info", `External call details: ${serviceName}.${methodPath.join('.')}`);
 
       // Create child stack run for external call
       const suspensionData = await makeExternalCall(serviceName, methodPath, args, taskRunId, stackRunId);
@@ -387,7 +392,7 @@ async function handleResumeRequest(req: Request): Promise<Response> {
     hostLog(logPrefix, "info", `FlowState resume request for stack run ${stackRunIdToResume} with result: ${JSON.stringify(resultToInject).substring(0, 100)}...`);
 
     // Load the FlowState task from storage
-    const flowStateTask = await FlowStateEdge.loadTask(stackRunIdToResume);
+    const flowStateTask = await SimpleFlowState.loadTask(stackRunIdToResume);
 
     if (!flowStateTask) {
       // Fallback to old resume mechanism for compatibility
@@ -413,7 +418,7 @@ async function handleResumeRequest(req: Request): Promise<Response> {
       fetchResponse: mockFetchResponse
     };
 
-    const result = await FlowStateEdge.resume(resumeRequest, {
+    const result = await SimpleFlowState.resume(resumeRequest, {
       saveToStorage: true,
       ttl: 2 * 60 * 60 * 1000 // 2 hours
     });

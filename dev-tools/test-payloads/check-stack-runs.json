@@ -1,8 +1,0 @@
-{
-  "chain": [
-    { "property": "from", "args": ["stack_runs"] },
-    { "property": "select", "args": ["*"] },
-    { "property": "order", "args": ["created_at", {"ascending": false}] },
-    { "property": "limit", "args": [5] }
-  ]
-}
