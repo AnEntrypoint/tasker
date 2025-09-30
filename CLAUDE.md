@@ -60,6 +60,7 @@ The system uses HTTP chaining instead of polling with automatic suspend/resume:
 ```bash
 supabase start              # Start local Supabase
 npm run serve              # Start edge functions server
+npm run gmail-search       # Start server and run Gmail search together
 ```
 
 **Task Testing:**
@@ -70,6 +71,7 @@ npm run test:deno          # Test deno-executor directly
 npm run test:stack         # Test simple-stack-processor
 npm run gmail-search       # Run concurrently: server + Gmail search CLI
 npm run gmail-search:quick # Quick test with small parameters
+npm run test:all           # List all available function tests
 node comprehensive-gmail-search-cli.js --maxUsersPerDomain 98 --maxResultsPerUser 300
 ```
 
@@ -78,11 +80,6 @@ node comprehensive-gmail-search-cli.js --maxUsersPerDomain 98 --maxResultsPerUse
 npm run dev:function       # Start development server for any function
 npm run test:function      # Test individual functions
 npm run debug:function     # Debug function execution
-npm run test:all           # List all available function tests
-```
-
-**Service-Specific Development:**
-```bash
 npm run dev:gapi           # Development server for wrappedgapi
 npm run dev:keystore       # Development server for wrappedkeystore
 npm run dev:supabase       # Development server for wrappedsupabase
@@ -119,6 +116,8 @@ npm run debug:clear        # Clear execution tables (preserves keystore/task_fun
 - Always check CLI output properly - We dont want mocks, fakes simulations or fallbacks cause it hides issues
 - Test individual functions using `npm run test:function` before integration testing
 - Verify complete end-to-end execution with real data before declaring success
+- Use `dev-tools/` directory for function development with hot reload
+- Development tools provide immediate feedback without full stack execution
 
 **Stack Processing Rules:**
 - Stack processor uses HTTP chaining, not polling
@@ -144,6 +143,8 @@ npm run debug:clear        # Clear execution tables (preserves keystore/task_fun
 
 **Code Access Principles:**
 - Dont make it direct access anything that uses a library or external code of any kind should be used through their single point of reference in their wrapped edge functions
+- All external integrations (Google API, Supabase, Keystore) must go through service wrappers
+- Direct library calls are prohibited - always use wrapped edge functions for external services
 
 ## Task Execution Flow
 
@@ -265,6 +266,62 @@ The database schema has been enhanced with recent migrations:
 - `004_add_waiting_column_to_stack_runs.sql` - Added waiting status optimization
 - `20250826113115_create_task_locks_table.sql` - Added execution locking mechanism
 
+## FlowState Integration
+
+The project now integrates FlowState library for advanced task state management:
+
+**FlowState Components:**
+- `supabase/functions/deno-executor/flowstate-storage.ts` - Custom Supabase storage adapter for FlowState
+- Enhanced task execution with FlowState persistence and recovery
+- Improved suspend/resume mechanism with state serialization
+- Better handling of long-running tasks with state checkpointing
+
+**FlowState Benefits:**
+- More reliable task state persistence
+- Enhanced error recovery capabilities
+- Improved debugging and monitoring
+- Better resource management for long-running tasks
+
+## Additional Service Components
+
+**Other Wrapped Services:**
+- `supabase/functions/wrappedwebsearch/` - Web search integration wrapper
+- `supabase/functions/wrappedopenai/` - OpenAI API integration wrapper
+- `supabase/functions/admin-debug/` - Administrative debugging interface
+
+**Task Registry System:**
+- `supabase/functions/tasks/registry/` - Task registration and discovery system
+- `supabase/functions/tasks/services/` - Database and module generation services
+- `supabase/functions/tasks/handlers/` - Task execution handlers
+
+**Development Infrastructure:**
+- `dev-tools/` - Hot reload development server and testing tools
+- Task code publishing system via `taskcode/publish.ts`
+
+# Core Functionality
+- This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
+- The codebase should prioritize being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
+- Parent tasks must receive results from child calls before making subsequent calls to maintain proper causality and prevent parallel execution issues.
+
+**Task Registry System:**
+- `supabase/functions/tasks/registry/` - Task registration and discovery system
+- `supabase/functions/tasks/services/` - Database and module generation services
+- `supabase/functions/tasks/handlers/` - Task execution handlers
+
+**Development Infrastructure:**
+- `dev-tools/` - Hot reload development server and testing tools
+- Task code publishing system via `taskcode/publish.ts`
+
+# Core Functionality
+- This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution using FlowState for advanced task state management, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
+- The codebase prioritizes being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
+- Parent tasks must receive results from child calls before making subsequent calls to maintain proper causality and prevent parallel execution issues.
+
+# Project Details
+- The project uses wrapped edge functions for all external integrations (wrappedgapi, wrappedkeystore, wrappedsupabase, wrappedwebsearch, wrappedopenai) and requires real testing conditions without mocks or simulations.
+- Development requires concurrently running server and client with 5-second max wait times, and uses development tools instead of curl for debugging Deno edge functions.
+- FlowState library integration provides enhanced task state persistence and recovery capabilities.
+
 ## Testing Verification Requirements
 
 When testing Gmail search functionality, verify complete end-to-end execution:
@@ -273,6 +330,7 @@ When testing Gmail search functionality, verify complete end-to-end execution:
 2. **Non-empty Results**: Must return actual domain data, user accounts, and email messages
 3. **Automatic Processing**: No manual intervention required - stack processor handles all suspensions/resumes
 4. **Causality Preservation**: Parent tasks receive child results before making subsequent calls
+5. **FlowState Integration**: Task state properly persisted and recovered during suspension/resume
 
 ## Development Tools Architecture
 
@@ -285,10 +343,11 @@ The `dev-tools/` directory provides specialized utilities for function developme
 These tools replace manual curl operations and provide better integration with the Deno edge function environment.
 
 # Core Functionality
-- This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
+- This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution using FlowState for advanced task state management, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
 - The codebase prioritizes being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
 - Parent tasks must receive results from child calls before making subsequent calls to maintain proper causality and prevent parallel execution issues.
 
 # Project Details
 - The project uses wrapped edge functions for all external integrations and requires real testing conditions without mocks or simulations.
 - Development requires concurrently running server and client with 5-second max wait times, and uses development tools instead of curl for debugging Deno edge functions.
+- FlowState library integration provides enhanced task state persistence and recovery capabilities.
