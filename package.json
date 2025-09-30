@@ -10,27 +10,13 @@
     "gmail-search:quick": "node comprehensive-gmail-search-cli.js --maxUsersPerDomain 2 --maxResultsPerUser 1",
     "publish:task": "deno run -A taskcode/publish.ts --specific comprehensive-gmail-search",
     "help": "node comprehensive-gmail-search-cli.js --help",
-    "dev:function": "node dev-tools/function-dev-server.js",
-    "test:function": "node dev-tools/function-tester.js",
-    "debug:function": "node dev-tools/function-debugger.js",
-    "dev:gapi": "npm run dev:function -- --function wrappedgapi",
-    "dev:keystore": "npm run dev:function -- --function wrappedkeystore",
-    "dev:supabase": "npm run dev:function -- --function wrappedsupabase",
-    "dev:deno": "npm run dev:function -- --function deno-executor",
-    "test:gapi": "npm run test:function -- --function wrappedgapi --test echo",
-    "test:keystore": "npm run test:function -- --function wrappedkeystore --test list-keys",
-    "test:deno": "npm run test:function -- --function deno-executor --test simple-test",
-    "test:stack": "npm run test:function -- --function simple-stack-processor --test test-boot",
     "test:gmail": "npm run gmail-search",
-    "test:gmail-simple": "npm run gmail-search:quick",
-    "test:all": "npm run test:function -- --list-tests",
-    "debug:db": "npm run debug:function -- --action database",
-    "debug:clear": "npm run debug:function -- --action clear-db",
-    "debug:logs": "npm run debug:function -- --action logs"
+    "test:gmail-simple": "npm run gmail-search:quick"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
-    "flowstate-execution": "file:../flowstate"
+    "flowstate-execution": "^3.2.0",
+    "sdk-http-wrapper": "file:../sdk-http-wrapper"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

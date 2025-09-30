@@ -1,9 +1,0 @@
-{
-  "taskCode": "module.exports = function(input) { console.log('Simple Deno test'); return { success: true, input: input, executor: 'deno' }; }",
-  "taskName": "deno-simple-test",
-  "taskInput": { "test": "data" },
-  "taskRunId": "test-deno-123",
-  "stackRunId": "stack-deno-123",
-  "toolNames": [],
-  "initialVmState": null
-}

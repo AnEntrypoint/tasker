@@ -669,6 +669,7 @@ async function getNextPendingStackRun() {
 startContinuousProcessing();
 
 // Main handler
+const port = parseInt(Deno.env.get('PORT') || '8001', 10);
 serve(async (req: Request) => {
   try {
     // Handle CORS preflight
@@ -733,6 +734,6 @@ serve(async (req: Request) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
-});
+}, { port });
 
-console.log("🚀 Simple Stack Processor started successfully");
+console.log(`🚀 Simple Stack Processor started successfully on port ${port}`);
