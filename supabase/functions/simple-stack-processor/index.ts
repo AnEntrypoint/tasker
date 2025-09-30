@@ -313,6 +313,32 @@ async function processServiceCall(stackRun: any) {
       throw new Error(`SUSPENDED_WAITING_FOR_CHILD:${suspensionData.stackRunId}`);
     }
 
+    // Check if this is a FlowState suspension response
+    if (result && result.status === 'paused' && result.suspensionData) {
+      log("info", `FlowState task suspended for external call, child stack run: ${result.suspensionData.stackRunId}`);
+
+      // Update the current stack run to suspended_waiting_child
+      await updateStackRunStatus(stackRun.id, 'suspended_waiting_child');
+
+      // Update waiting_on_stack_run_id to track which child we're waiting for
+      const { error: updateError } = await supabase
+        .from('stack_runs')
+        .update({
+          waiting_on_stack_run_id: result.suspensionData.stackRunId,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', stackRun.id);
+
+      if (updateError) {
+        log("error", `Failed to update waiting_on_stack_run_id for FlowState: ${updateError.message}`);
+      } else {
+        log("info", `Updated FlowState stack run ${stackRun.id} to wait for child ${result.suspensionData.stackRunId}`);
+      }
+
+      // Return suspension indicator for FlowState
+      throw new Error(`SUSPENDED_WAITING_FOR_CHILD:${result.suspensionData.stackRunId}`);
+    }
+
     return result;
 
   } catch (error) {
@@ -407,13 +433,22 @@ async function resumeParentTask(stackRun: any, result: any) {
     }
 
     const resumeResult = await resumeResponse.json();
-    log("info", `Parent task ${stackRun.parent_stack_run_id} resumed successfully`);
+    log("info", `Parent task ${stackRun.parent_stack_run_id} resumed successfully with status: ${resumeResult.status}`);
 
-    // Update parent with final result
+    // Handle different resume statuses including FlowState states
     if (resumeResult.status === 'completed') {
       await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.result);
     } else if (resumeResult.status === 'error') {
       await updateStackRunStatus(stackRun.parent_stack_run_id, 'failed', null, resumeResult.error);
+    } else if (resumeResult.status === 'paused') {
+      // FlowState task paused again - this is normal behavior
+      log("info", `Parent task ${stackRun.parent_stack_run_id} paused again (FlowState multi-step execution)`);
+      // The parent is already in the correct suspended state in the database
+      // No need to update status here as it's handled by the deno-executor
+    } else {
+      log("warn", `Unknown resume status: ${resumeResult.status} for parent task ${stackRun.parent_stack_run_id}`);
+      // Update with whatever result we got
+      await updateStackRunStatus(stackRun.parent_stack_run_id, 'completed', resumeResult.result);
     }
 
     // Note: No need to trigger next processing here since the resumed task

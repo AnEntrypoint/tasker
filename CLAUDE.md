@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Architecture
 
-This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution. The system implements automatic suspend/resume execution with HTTP-based stack processing chains.
+This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution. The system implements automatic suspend/resume execution with HTTP-based stack processing chains, enabling infinite length tasks without timeouts or memory issues.
 
 ### Core Components
 
@@ -17,10 +17,18 @@ This is a Gmail search task runner built on Supabase Edge Functions with native 
 - `supabase/functions/wrappedgapi/` - Google API integration with service account authentication
 - `supabase/functions/wrappedkeystore/` - Key-value store for credentials (Google API keys, admin emails)
 - `supabase/functions/wrappedsupabase/` - Database operations proxy
+- `supabase/functions/wrappedopenai/` - OpenAI API integration
+- `supabase/functions/wrappedwebsearch/` - Web search API integration
 
 **Task Code**
 - `taskcode/endpoints/comprehensive-gmail-search.js` - Main Gmail search task implementation
+- `taskcode/publish.ts` - Task publishing utility
 - `comprehensive-gmail-search-cli.js` - CLI tool for testing the Gmail search
+
+**Development Tools**
+- `dev-tools/function-dev-server.js` - Development server for testing individual functions
+- `dev-tools/function-tester.js` - Utility for testing edge functions
+- `dev-tools/function-debugger.js` - Debugging tools for function development
 
 ### Stack Processing Architecture
 
@@ -56,11 +64,33 @@ npm run serve              # Start edge functions server
 
 **Task Testing:**
 ```bash
-npm run test:gmail         # Full Gmail search with concurrency
+npm run test:gmail         # Full Gmail search with concurrency (98 users, 300 results each)
 npm run test:gmail-simple  # Simple test (2 users, 1 result each)
 npm run test:deno          # Test deno-executor directly
 npm run test:stack         # Test simple-stack-processor
+npm run gmail-search       # Run concurrently: server + Gmail search CLI
+npm run gmail-search:quick # Quick test with small parameters
 node comprehensive-gmail-search-cli.js --maxUsersPerDomain 98 --maxResultsPerUser 300
+```
+
+**Function Development:**
+```bash
+npm run dev:function       # Start development server for any function
+npm run test:function      # Test individual functions
+npm run debug:function     # Debug function execution
+npm run test:all           # List all available function tests
+```
+
+**Service-Specific Development:**
+```bash
+npm run dev:gapi           # Development server for wrappedgapi
+npm run dev:keystore       # Development server for wrappedkeystore
+npm run dev:supabase       # Development server for wrappedsupabase
+npm run dev:deno           # Development server for deno-executor
+npm run test:gapi          # Test wrappedgapi function
+npm run test:keystore      # Test wrappedkeystore function
+npm run test:deno          # Test deno-executor function
+npm run test:stack         # Test simple-stack-processor function
 ```
 
 **Task Publishing:**
@@ -70,9 +100,9 @@ npm run publish:task       # Publish comprehensive Gmail search task to database
 
 **Debugging:**
 ```bash
-npm run debug:db               # Check database state
-npm run debug:logs             # View recent logs
-npm run debug:clear            # Clear database tables
+npm run debug:db           # Check database state
+npm run debug:logs         # View recent logs
+npm run debug:clear        # Clear execution tables (preserves keystore/task_functions)
 ```
 
 ## Critical Development Principles
@@ -85,9 +115,10 @@ npm run debug:clear            # Clear database tables
 
 **Testing Principles:**
 - Never use mocks or fake data - only test with real working conditions
-- Use MCP REPL tool instead of curl for debugging and Deno testing
-- Always check CLI output properly
-- We dont want mocks, fakes simulations or fallbacks cause it hides issues
+- Use development tools (`dev-tools/function-tester.js`) instead of curl for debugging
+- Always check CLI output properly - We dont want mocks, fakes simulations or fallbacks cause it hides issues
+- Test individual functions using `npm run test:function` before integration testing
+- Verify complete end-to-end execution with real data before declaring success
 
 **Stack Processing Rules:**
 - Stack processor uses HTTP chaining, not polling
@@ -218,11 +249,46 @@ Verify that the comprehensive Gmail search task executes completely from start t
 
 Do not declare success until you can demonstrate a complete task run that produces meaningful Gmail search results with actual email data from real user accounts across multiple domains. If any step fails or produces empty results when data should exist, diagnose and fix the root cause before proceeding.
 
+## Database Schema Updates
+
+The database schema has been enhanced with recent migrations:
+
+**Recent Additions:**
+- `suspended_at` timestamp column for tracking suspension timing
+- `resume_payload` column for storing parent task resume data
+- `waiting` column to optimize suspended task queries
+- `task_locks` table for preventing concurrent execution conflicts
+
+**Migration Files:**
+- `006_add_suspended_at_column.sql` - Added suspension timing tracking
+- `005_add_resume_payload_column.sql` - Added resume data storage
+- `004_add_waiting_column_to_stack_runs.sql` - Added waiting status optimization
+- `20250826113115_create_task_locks_table.sql` - Added execution locking mechanism
+
+## Testing Verification Requirements
+
+When testing Gmail search functionality, verify complete end-to-end execution:
+
+1. **Complete Execution Flow**: Domain discovery → User enumeration → Message search → Detail retrieval → Result aggregation
+2. **Non-empty Results**: Must return actual domain data, user accounts, and email messages
+3. **Automatic Processing**: No manual intervention required - stack processor handles all suspensions/resumes
+4. **Causality Preservation**: Parent tasks receive child results before making subsequent calls
+
+## Development Tools Architecture
+
+The `dev-tools/` directory provides specialized utilities for function development:
+
+- **function-dev-server.js**: Starts individual function servers for isolated testing
+- **function-tester.js**: Runs automated tests against specific functions
+- **function-debugger.js**: Provides debugging capabilities for function execution
+
+These tools replace manual curl operations and provide better integration with the Deno edge function environment.
+
 # Core Functionality
-- This is a Gmail search task runner built on Supabase Edge Functions with QuickJS VM, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
-- The codebase should prioritize being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
+- This is a Gmail search task runner built on Supabase Edge Functions with native Deno execution, using HTTP-based stack processing chains instead of polling for automatic suspend/resume execution.
+- The codebase prioritizes being small, maintainable, and easy to understand while preserving the ability to break tasks up call by call for infinite length tasks.
 - Parent tasks must receive results from child calls before making subsequent calls to maintain proper causality and prevent parallel execution issues.
 
 # Project Details
-- The project uses wrapped edge functions for all external integrations (wrappedgapi, wrappedkeystore, wrappedsupabase) and requires real testing conditions without mocks or simulations.
-- Development requires concurrently running server and client with 5-second max wait times, and uses MCP REPL tool instead of curl for debugging Deno edge functions.
+- The project uses wrapped edge functions for all external integrations and requires real testing conditions without mocks or simulations.
+- Development requires concurrently running server and client with 5-second max wait times, and uses development tools instead of curl for debugging Deno edge functions.
