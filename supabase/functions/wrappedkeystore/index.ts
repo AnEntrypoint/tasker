@@ -2,7 +2,8 @@ import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
 import { serviceRegistry } from "../_shared/service-registry.ts";
 import { BaseHttpHandler, HttpStatus, createHealthCheckResponse } from "../_shared/http-handler.ts";
 import { config } from "../_shared/config-service.ts";
-import { BaseService, ServiceOperation, ServiceError, ServiceErrorType } from "../_shared/base-service.ts";
+import { BaseService, ServiceError, ServiceErrorType } from "../_shared/base-service.ts";
+import { logger } from "../_shared/logging-service.ts";
 
 // Type definitions
 interface IServerTimeResult {
@@ -63,54 +64,87 @@ class KeystoreService extends BaseService {
     ];
   }
 
-  // Helper method to call wrappedsupabase using service registry
-  @ServiceOperation('callWrappedSupabase')
   private async callWrappedSupabase(chain: any[]): Promise<any> {
     return this.executeOperation(
       'callWrappedSupabase',
       async () => {
-        // Use service registry to call wrappedsupabase
-        const result = await serviceRegistry.call('wrappedsupabase', 'execute', [chain]);
+        const response = await fetch(this.wrappedSupabaseUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${this.serviceRoleKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ chain })
+        });
 
-        if (!result.success) {
+        if (!response.ok) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `wrappedsupabase call failed: ${result.error}`,
+            `wrappedsupabase HTTP call failed: ${response.status} ${response.statusText}`,
+            'WRAPPED_SUPABASE_HTTP_ERROR',
+            { status: response.status }
+          );
+        }
+
+        const result = await response.json();
+        logger.info(`callWrappedSupabase got result:`, { result });
+
+        if (!result.success || !result.data) {
+          throw new ServiceError(
+            ServiceErrorType.EXTERNAL_SERVICE_ERROR,
+            `wrappedsupabase call failed: ${result.error || 'Unknown error'}`,
             'WRAPPED_SUPABASE_ERROR',
             { error: result.error }
           );
         }
 
-        return result.data;
+        const innerResult = result.data;
+        logger.info(`callWrappedSupabase got innerResult:`, { innerResult });
+
+        if (!innerResult.success || innerResult.error) {
+          throw new ServiceError(
+            ServiceErrorType.EXTERNAL_SERVICE_ERROR,
+            `wrappedsupabase data error: ${innerResult.error?.message || 'Unknown error'}`,
+            'WRAPPED_SUPABASE_DATA_ERROR',
+            { error: innerResult.error }
+          );
+        }
+
+        const returnValue = innerResult.data;
+        logger.info(`callWrappedSupabase returning:`, { returnValue });
+        return returnValue;
       }
     );
   }
   
 
   // Get a stored key value
-  @ServiceOperation('getKey')
   async getKey(namespace: string, key: string): Promise<string | null> {
     return this.executeOperation(
       'getKey',
       async () => {
-        const result = await this.callWrappedSupabase([
+        const wrappedResponse = await this.callWrappedSupabase([
           { property: 'from', args: ['keystore'] },
           { property: 'select', args: ['key_value'] },
           { property: 'eq', args: ['key_name', key] },
           { property: 'limit', args: [1] }
         ]);
 
-        if (result.error) {
+        // callWrappedSupabase is wrapped by executeOperation, so unwrap it
+        const supabaseResponse = wrappedResponse.data;
+
+        if (supabaseResponse.error) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed to get key: ${result.error.message || JSON.stringify(result.error)}`,
+            `Failed to get key: ${supabaseResponse.error}`,
             'GET_KEY_ERROR',
-            { key, namespace, originalError: result.error }
+            { key, namespace, originalError: supabaseResponse.error }
           );
         }
 
-        if (result.data && result.data.length > 0) {
-          return result.data[0].key_value;
+        const rows = supabaseResponse.data;
+        if (rows && rows.length > 0) {
+          return rows[0].key_value;
         }
 
         return null;
@@ -120,23 +154,24 @@ class KeystoreService extends BaseService {
   }
   
   // Store a key value
-  @ServiceOperation('setKey')
   async setKey(namespace: string, key: string, value: string): Promise<boolean> {
     return this.executeOperation(
       'setKey',
       async () => {
         // Check if the key exists
-        const checkResult = await this.callWrappedSupabase([
+        const wrappedCheckResult = await this.callWrappedSupabase([
           { property: 'from', args: ['keystore'] },
           { property: 'select', args: ['id'] },
           { property: 'eq', args: ['key_name', key] },
           { property: 'limit', args: [1] }
         ]);
 
+        const checkResult = wrappedCheckResult.data;
+
         if (checkResult.error) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed during existence check: ${checkResult.error.message || JSON.stringify(checkResult.error)}`,
+            `Failed during existence check: ${checkResult.error}`,
             'SET_KEY_EXISTENCE_CHECK_ERROR',
             { key, namespace, originalError: checkResult.error }
           );
@@ -144,27 +179,29 @@ class KeystoreService extends BaseService {
 
         const exists = checkResult.data && checkResult.data.length > 0;
 
-        let result;
+        let wrappedResult;
         if (exists) {
           // Update existing key
-          result = await this.callWrappedSupabase([
+          wrappedResult = await this.callWrappedSupabase([
             { property: 'from', args: ['keystore'] },
             { property: 'update', args: [{ key_value: value, updated_at: new Date().toISOString() }] },
             { property: 'eq', args: ['key_name', key] }
           ]);
         } else {
           // Insert new key
-          result = await this.callWrappedSupabase([
+          wrappedResult = await this.callWrappedSupabase([
             { property: 'from', args: ['keystore'] },
             { property: 'insert', args: [{ key_name: key, key_value: value }] }
           ]);
         }
 
+        const result = wrappedResult.data;
+
         if (result.error) {
           const action = exists ? 'update' : 'insert';
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed to ${action} key: ${result.error.message || JSON.stringify(result.error)}`,
+            `Failed to ${action} key: ${result.error}`,
             `${action.toUpperCase()}_KEY_ERROR`,
             { key, namespace, action, originalError: result.error }
           );
@@ -177,20 +214,21 @@ class KeystoreService extends BaseService {
   }
   
   // List all keys in a namespace
-  @ServiceOperation('listKeys')
   async listKeys(namespace: string): Promise<string[]> {
     return this.executeOperation(
       'listKeys',
       async () => {
-        const result = await this.callWrappedSupabase([
+        const wrappedResult = await this.callWrappedSupabase([
           { property: 'from', args: ['keystore'] },
           { property: 'select', args: ['key_name'] }
         ]);
 
+        const result = wrappedResult.data;
+
         if (result.error) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed to list keys: ${result.error.message || JSON.stringify(result.error)}`,
+            `Failed to list keys: ${result.error}`,
             'LIST_KEYS_ERROR',
             { namespace, originalError: result.error }
           );
@@ -203,22 +241,23 @@ class KeystoreService extends BaseService {
   }
   
   // Check if a key exists in a namespace
-  @ServiceOperation('hasKey')
   async hasKey(namespace: string, key: string): Promise<boolean> {
     return this.executeOperation(
       'hasKey',
       async () => {
-        const result = await this.callWrappedSupabase([
+        const wrappedResult = await this.callWrappedSupabase([
           { property: 'from', args: ['keystore'] },
           { property: 'select', args: ['id'] },
           { property: 'eq', args: ['key_name', key] },
           { property: 'limit', args: [1] }
         ]);
 
+        const result = wrappedResult.data;
+
         if (result.error) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed to check key existence: ${result.error.message || JSON.stringify(result.error)}`,
+            `Failed to check key existence: ${result.error}`,
             'HAS_KEY_ERROR',
             { key, namespace, originalError: result.error }
           );
@@ -231,20 +270,21 @@ class KeystoreService extends BaseService {
   }
   
   // List all namespaces
-  @ServiceOperation('listNamespaces')
   async listNamespaces(): Promise<string[]> {
     return this.executeOperation(
       'listNamespaces',
       async () => {
-        const result = await this.callWrappedSupabase([
+        const wrappedResult = await this.callWrappedSupabase([
           { property: 'from', args: ['keystore'] },
           { property: 'select', args: ['scope'] }
         ]);
 
+        const result = wrappedResult.data;
+
         if (result.error) {
           throw new ServiceError(
             ServiceErrorType.EXTERNAL_SERVICE_ERROR,
-            `Failed to list namespaces: ${result.error.message || JSON.stringify(result.error)}`,
+            `Failed to list namespaces: ${result.error}`,
             'LIST_NAMESPACES_ERROR',
             { originalError: result.error }
           );
@@ -265,7 +305,6 @@ class KeystoreService extends BaseService {
   }
   
   // Get the current server time
-  @ServiceOperation('getServerTime')
   getServerTime(): IServerTimeResult {
     const timestamp = new Date().toISOString();
     return { timestamp, source: "keystore" };
@@ -302,7 +341,6 @@ class KeystoreService extends BaseService {
 
     return baseHealth;
   }
-}
 }
 
 // Create keystore service instance
@@ -392,4 +430,6 @@ class KeystoreHttpHandler extends BaseHttpHandler {
 
 // Create handler instance and start serving
 const keystoreHandler = new KeystoreHttpHandler();
-serve((req) => keystoreHandler.handle(req));
+const port = parseInt(Deno.env.get('PORT') || '8003');
+console.log(`Starting keystore service on port ${port}...`);
+serve((req) => keystoreHandler.handle(req), { port });

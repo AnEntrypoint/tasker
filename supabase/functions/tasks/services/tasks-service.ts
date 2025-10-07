@@ -38,53 +38,117 @@ export const tasksService = {
         return { success: false, error, logs };
       }
 
-      // Execute the fetched function
-      logs.push(formatLogMessage('INFO', `[SDK Service] Executing task from database: ${taskName || taskIdentifier}`));
+      // Delegate to deno-executor for tasks that require suspend/resume capabilities
+      logs.push(formatLogMessage('INFO', `[SDK Service] Delegating task to deno-executor: ${taskName || taskIdentifier}`));
 
-      // Create sandbox for database task execution
-      const AsyncFunction = (async function() {}).constructor as any;
-      const sandbox = {
-        console: {
-          log: (...args: any[]) => {
-            logs.push(formatLogMessage('INFO', `[Database Task] ${args.join(' ')}`));
-          },
-          error: (...args: any[]) => {
-            logs.push(formatLogMessage('ERROR', `[Database Task] ${args.join(' ')}`));
-          }
-        },
-        setTimeout,
-        clearTimeout,
-        Date,
-        JSON,
-        Math,
-        parseInt,
-        parseFloat,
-        String,
-        Number,
-        Array,
-        Object,
-        // Add task execution helpers
-        fetch: (url: string, options?: RequestInit) => {
-          logs.push(formatLogMessage('INFO', `[Database Task] Fetch: ${options?.method || 'GET'} ${url}`));
-          return fetch(url, options);
-        }
-      };
+      // Use simple direct database approach
+      const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+      const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+      const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2');
+      const supabase = createClient(supabaseUrl, serviceRoleKey);
 
-      // Create task execution function with sandbox
-      const taskExecutionFunction = new AsyncFunction(
-        ...Object.keys(sandbox),
-        dbTaskFunction
-      );
+      logs.push(formatLogMessage('INFO', `[SDK Service] Created direct Supabase client`));
 
-      // Execute with sandbox context
-      const result = await taskExecutionFunction(...Object.values(sandbox));
+      // First, get the task function data directly
+      const { data: taskData, error: taskError } = await supabase
+        .from('task_functions')
+        .select('*')
+        .eq('name', taskIdentifier)
+        .single();
 
-      logs.push(formatLogMessage('INFO', `[SDK Service] Task execution completed successfully`));
-
-      if (options.include_logs) {
-        return { success: true, result, logs, taskName, description };
+      if (taskError || !taskData) {
+        const error = `Task data not found: ${taskError?.message || 'Unknown error'}`;
+        logs.push(formatLogMessage('ERROR', `[SDK Service] ${error}`));
+        return { success: false, error, logs };
       }
-      return { success: true, result, taskName, description };
+
+      logs.push(formatLogMessage('INFO', `[SDK Service] Retrieved task data: ${JSON.stringify({ id: taskData.id, name: taskData.name, description: taskData.description })}`));
+
+      // Create task run directly
+      const taskNameForRun = taskData.name || taskIdentifier;
+      logs.push(formatLogMessage('INFO', `[SDK Service] Using task name: ${taskNameForRun}`));
+
+      const { data: taskRunData, error: createError } = await supabase
+        .from('task_runs')
+        .insert({
+          task_function_id: taskData.id,
+          task_name: taskNameForRun,
+          input: input,
+          status: 'pending'
+        })
+        .select()
+        .single();
+
+      if (createError || !taskRunData) {
+        const error = `Failed to create task run: ${createError?.message || 'Unknown error'}`;
+        logs.push(formatLogMessage('ERROR', `[SDK Service] ${error}`));
+        return { success: false, error, logs };
+      }
+
+      const taskRun = taskRunData;
+      logs.push(formatLogMessage('INFO', `[SDK Service] Created task run ${taskRun.id}, creating initial stack run`));
+
+      const { data: initialStackRunData, error: initialStackRunError } = await supabase
+        .from('stack_runs')
+        .insert({
+          parent_task_run_id: taskRun.id,
+          service_name: 'deno-executor',
+          method_name: 'execute',
+          args: {
+            taskCode: taskData.code,
+            taskName: taskData.name,
+            taskInput: input,
+            taskRunId: String(taskRun.id),
+            stackRunId: '0'
+          },
+          status: 'pending'
+        })
+        .select()
+        .single();
+
+      if (initialStackRunError || !initialStackRunData) {
+        const error = `Failed to create initial stack run: ${initialStackRunError?.message || 'Unknown error'}`;
+        logs.push(formatLogMessage('ERROR', `[SDK Service] ${error}`));
+        return { success: false, error, logs };
+      }
+
+      const actualStackRunId = initialStackRunData.id;
+
+      const { error: updateStackRunError } = await supabase
+        .from('stack_runs')
+        .update({
+          args: {
+            taskCode: taskData.code,
+            taskName: taskData.name,
+            taskInput: input,
+            taskRunId: String(taskRun.id),
+            stackRunId: String(actualStackRunId)
+          }
+        })
+        .eq('id', actualStackRunId);
+
+      if (updateStackRunError) {
+        logs.push(formatLogMessage('WARN', `[SDK Service] Failed to update stackRunId in args: ${updateStackRunError.message}`));
+      }
+
+      logs.push(formatLogMessage('INFO', `[SDK Service] Created initial stack run ${actualStackRunId}, triggering FIFO processing`));
+
+      const { triggerFIFOProcessingChain } = await import('./stack-processor.ts');
+      await triggerFIFOProcessingChain(supabaseUrl, serviceRoleKey);
+
+      // Return immediately after triggering processing (for testing)
+      logs.push(formatLogMessage('INFO', `[SDK Service] Task ${taskRun.id} submitted successfully, processing in background`));
+      return {
+        success: true,
+        result: {
+          taskRunId: taskRun.id,
+          status: 'submitted',
+          message: 'Task submitted for background processing'
+        },
+        logs,
+        taskName: taskData.name,
+        description: taskData.description
+      };
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

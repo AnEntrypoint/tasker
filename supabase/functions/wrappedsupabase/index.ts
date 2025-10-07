@@ -58,7 +58,6 @@ class SupabaseService extends BaseService {
     });
   }
 
-  @ServiceOperation('processChain')
   async processChain(chain: any[]): Promise<any> {
     return this.executeOperation(
       'processChain',
@@ -90,7 +89,23 @@ class SupabaseService extends BaseService {
         }
 
         // Execute the final result if it's a promise
-        return await result;
+        const finalResult = await result;
+
+        // Check if the result has an error (Supabase error format)
+        if (finalResult && finalResult.error) {
+          const errorMessage = finalResult.error.message || 'Database operation failed';
+          const errorDetails = finalResult.error.details || finalResult.error.hint || '';
+          const fullMessage = errorDetails ? `${errorMessage}: ${errorDetails}` : errorMessage;
+
+          throw new ServiceError(
+            ServiceErrorType.INTERNAL_ERROR,
+            fullMessage,
+            'DATABASE_ERROR',
+            { error: finalResult.error, chain }
+          );
+        }
+
+        return finalResult;
       },
       { chainLength: chain.length }
     );
@@ -182,4 +197,6 @@ class WrappedSupabaseHandler extends BaseHttpHandler {
 
 // Create handler instance and start serving
 const wrappedSupabaseHandler = new WrappedSupabaseHandler();
-serve((req) => wrappedSupabaseHandler.handle(req));
+const port = parseInt(Deno.env.get('PORT') || '8002');
+console.log(`Starting wrappedsupabase service on port ${port}...`);
+serve((req) => wrappedSupabaseHandler.handle(req), { port });

@@ -5,7 +5,7 @@
  * and consistent error handling patterns.
  */
 
-import { hostLog as newHostLog, logger, log, performance, context } from './logging-service.ts';
+import { hostLog as newHostLog, logger, log, perf, context } from './logging-service.ts';
 import { database, fetchTaskFromDatabase as dbFetchTaskFromDatabase, createServiceRoleClient } from './database-service.ts';
 
 // Shared type definitions
@@ -93,7 +93,7 @@ export function validateRequired(obj: any, requiredFields: string[]): { isValid:
 export const hostLog = newHostLog;
 
 // Export logging utilities for convenience
-export { logger, log, performance, context } from './logging-service.ts';
+export { logger, log, perf, context } from './logging-service.ts';
 
 // Database utilities
 export const fetchTaskFromDatabase = async (

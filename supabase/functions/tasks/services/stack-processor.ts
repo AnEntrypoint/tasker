@@ -120,7 +120,12 @@ export async function executeStackRunSynchronously(stackRunId: string, baseUrl: 
 
 export async function triggerFIFOProcessingChain(baseUrl: string, serviceRoleKey: string): Promise<void> {
     try {
-        const response = await fetch(`${baseUrl}/functions/v1/simple-stack-processor`, {
+        // Use internal kong URL for inter-function communication
+        const internalUrl = 'http://kong:8000/functions/v1/simple-stack-processor';
+
+        hostLog(LOG_PREFIX_BASE, `🚀 Triggering FIFO processing chain at ${internalUrl}`);
+
+        const response = await fetch(internalUrl, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${serviceRoleKey}`,
@@ -130,12 +135,14 @@ export async function triggerFIFOProcessingChain(baseUrl: string, serviceRoleKey
         });
 
         if (!response.ok) {
-            hostLog(LOG_PREFIX_BASE, `Failed to trigger FIFO processing: ${response.status} ${response.statusText}`);
+            const errorText = await response.text();
+            hostLog(LOG_PREFIX_BASE, `❌ Failed to trigger FIFO processing: ${response.status} ${response.statusText} - ${errorText}`);
         } else {
-            hostLog(LOG_PREFIX_BASE, `FIFO processing chain triggered successfully`);
+            const result = await response.text();
+            hostLog(LOG_PREFIX_BASE, `✅ FIFO processing chain triggered successfully: ${result}`);
         }
     } catch (error) {
-        hostLog(LOG_PREFIX_BASE, `Error triggering FIFO processing: ${error}`);
+        hostLog(LOG_PREFIX_BASE, `❌ Error triggering FIFO processing: ${error instanceof Error ? error.message : String(error)}`);
     }
 }
 

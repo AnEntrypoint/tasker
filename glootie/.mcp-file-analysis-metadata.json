@@ -1,0 +1,679 @@
+{
+  "version": "1.0",
+  "lastUpdated": 1759253187568,
+  "workingDirectory": "/mnt/c/dev/tasker",
+  "files": [
+    {
+      "path": ".env.example",
+      "firstSeen": 1759251107855,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1744024562927,
+      "lastUpdated": 1759251107855
+    },
+    {
+      "path": ".gitignore",
+      "firstSeen": 1759251107856,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752082135908,
+      "lastUpdated": 1759251107856
+    },
+    {
+      "path": "ARCHITECTURE_STANDARDS.md",
+      "firstSeen": 1759251107856,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244818476,
+      "lastUpdated": 1759251107856
+    },
+    {
+      "path": "CLAUDE.md",
+      "firstSeen": 1759251107857,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759227589786,
+      "lastUpdated": 1759251107857
+    },
+    {
+      "path": "MIGRATION.md",
+      "firstSeen": 1759251107858,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214214344,
+      "lastUpdated": 1759251107858
+    },
+    {
+      "path": "README.md",
+      "firstSeen": 1759251107859,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214155247,
+      "lastUpdated": 1759251107859
+    },
+    {
+      "path": "RULES.md",
+      "firstSeen": 1759251107860,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759241023298,
+      "lastUpdated": 1759251107860
+    },
+    {
+      "path": "SERVICE_REGISTRY_IMPORT_MAP.md",
+      "firstSeen": 1759251107861,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245932342,
+      "lastUpdated": 1759251107861
+    },
+    {
+      "path": "deno.json",
+      "firstSeen": 1759251107862,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214449568,
+      "lastUpdated": 1759251107862
+    },
+    {
+      "path": "deno.lock",
+      "firstSeen": 1759251107862,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759234726695,
+      "lastUpdated": 1759251107862
+    },
+    {
+      "path": "package-lock.json",
+      "firstSeen": 1759251107863,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759249010266,
+      "lastUpdated": 1759251107863
+    },
+    {
+      "path": "package.json",
+      "firstSeen": 1759251107864,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759243236084,
+      "lastUpdated": 1759251107864
+    },
+    {
+      "path": "prompt.md",
+      "firstSeen": 1759251107865,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756236070018,
+      "lastUpdated": 1759251107865
+    },
+    {
+      "path": "schema.sql",
+      "firstSeen": 1759251107866,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1747850700179,
+      "lastUpdated": 1759251107866
+    },
+    {
+      "path": "supabase/config.toml",
+      "firstSeen": 1759251107867,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756218158645,
+      "lastUpdated": 1759251107867
+    },
+    {
+      "path": "supabase/functions/_shared/LOGGING_MIGRATION_GUIDE.md",
+      "firstSeen": 1759251107870,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244137679,
+      "lastUpdated": 1759251107870
+    },
+    {
+      "path": "supabase/functions/_shared/LOGGING_SERVICE_SUMMARY.md",
+      "firstSeen": 1759251107872,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244234140,
+      "lastUpdated": 1759251107872
+    },
+    {
+      "path": "supabase/functions/_shared/base-service.ts",
+      "firstSeen": 1759251107875,
+      "lastReported": 1759253148934,
+      "reportedDates": {},
+      "lastModified": 1759253148934,
+      "lastUpdated": 1759253187472
+    },
+    {
+      "path": "supabase/functions/_shared/config-service.ts",
+      "firstSeen": 1759251107878,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245397101,
+      "lastUpdated": 1759251107878
+    },
+    {
+      "path": "supabase/functions/_shared/cors.ts",
+      "firstSeen": 1759251107881,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240682527,
+      "lastUpdated": 1759251107881
+    },
+    {
+      "path": "supabase/functions/_shared/database-service.ts",
+      "firstSeen": 1759251107885,
+      "lastReported": 1759246856808,
+      "reportedDates": {},
+      "lastModified": 1759246856808,
+      "lastUpdated": 1759253187475
+    },
+    {
+      "path": "supabase/functions/_shared/http-client.ts",
+      "firstSeen": 1759251107889,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245467900,
+      "lastUpdated": 1759251107889
+    },
+    {
+      "path": "supabase/functions/_shared/http-handler.ts",
+      "firstSeen": 1759251107894,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759243685479,
+      "lastUpdated": 1759251107894
+    },
+    {
+      "path": "supabase/functions/_shared/logging-example.ts",
+      "firstSeen": 1759251107899,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244197191,
+      "lastUpdated": 1759251107899
+    },
+    {
+      "path": "supabase/functions/_shared/logging-service.ts",
+      "firstSeen": 1759251107903,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245529532,
+      "lastUpdated": 1759251107903
+    },
+    {
+      "path": "supabase/functions/_shared/service-registry.ts",
+      "firstSeen": 1759251107908,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245437346,
+      "lastUpdated": 1759251107908
+    },
+    {
+      "path": "supabase/functions/_shared/test-logging.ts",
+      "firstSeen": 1759251107912,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244210119,
+      "lastUpdated": 1759251107912
+    },
+    {
+      "path": "supabase/functions/_shared/utils.ts",
+      "firstSeen": 1759251107916,
+      "lastReported": 1759246924761,
+      "reportedDates": {},
+      "lastModified": 1759246924761,
+      "lastUpdated": 1759253187478
+    },
+    {
+      "path": "supabase/functions/admin-debug/index.ts",
+      "firstSeen": 1759251107920,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214255791,
+      "lastUpdated": 1759251107920
+    },
+    {
+      "path": "supabase/functions/deno-executor/flowstate-storage.ts",
+      "firstSeen": 1759251107923,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759227518158,
+      "lastUpdated": 1759251107923
+    },
+    {
+      "path": "supabase/functions/deno-executor/index.ts",
+      "firstSeen": 1759251107927,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245847883,
+      "lastUpdated": 1759251107927
+    },
+    {
+      "path": "supabase/functions/deno-executor/vm-state-manager.ts",
+      "firstSeen": 1759251107930,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756215747662,
+      "lastUpdated": 1759251107930
+    },
+    {
+      "path": "supabase/functions/deno.json",
+      "firstSeen": 1759251107933,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240682592,
+      "lastUpdated": 1759251107933
+    },
+    {
+      "path": "supabase/functions/deno.lock",
+      "firstSeen": 1759251107936,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759234867267,
+      "lastUpdated": 1759251107936
+    },
+    {
+      "path": "supabase/functions/import_map.json",
+      "firstSeen": 1759251107939,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214530915,
+      "lastUpdated": 1759251107939
+    },
+    {
+      "path": "supabase/functions/simple-stack-processor/index.ts",
+      "firstSeen": 1759251107942,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245407132,
+      "lastUpdated": 1759251107942
+    },
+    {
+      "path": "supabase/functions/tasks/.npmrc",
+      "firstSeen": 1759251107946,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240682865,
+      "lastUpdated": 1759251107946
+    },
+    {
+      "path": "supabase/functions/tasks/config/supabase-config.ts",
+      "firstSeen": 1759251107952,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244393522,
+      "lastUpdated": 1759251107952
+    },
+    {
+      "path": "supabase/functions/tasks/deno.json",
+      "firstSeen": 1759251107956,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240682884,
+      "lastUpdated": 1759251107956
+    },
+    {
+      "path": "supabase/functions/tasks/deno.lock",
+      "firstSeen": 1759251107960,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240682907,
+      "lastUpdated": 1759251107960
+    },
+    {
+      "path": "supabase/functions/tasks/handlers/task-executor.ts",
+      "firstSeen": 1759251107966,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244434991,
+      "lastUpdated": 1759251107966
+    },
+    {
+      "path": "supabase/functions/tasks/index-original.ts",
+      "firstSeen": 1759251107970,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756215763657,
+      "lastUpdated": 1759251107970
+    },
+    {
+      "path": "supabase/functions/tasks/index.ts",
+      "firstSeen": 1759251107974,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245901082,
+      "lastUpdated": 1759251107974
+    },
+    {
+      "path": "supabase/functions/tasks/registry/task-registry.ts",
+      "firstSeen": 1759251107979,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683010,
+      "lastUpdated": 1759251107979
+    },
+    {
+      "path": "supabase/functions/tasks/services/database.ts",
+      "firstSeen": 1759251107984,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759244382532,
+      "lastUpdated": 1759251107984
+    },
+    {
+      "path": "supabase/functions/tasks/services/module-generator.ts",
+      "firstSeen": 1759251107988,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683060,
+      "lastUpdated": 1759251107988
+    },
+    {
+      "path": "supabase/functions/tasks/services/schema-generator.ts",
+      "firstSeen": 1759251107993,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683080,
+      "lastUpdated": 1759251107993
+    },
+    {
+      "path": "supabase/functions/tasks/services/stack-processor.ts",
+      "firstSeen": 1759251107998,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759243159983,
+      "lastUpdated": 1759251107998
+    },
+    {
+      "path": "supabase/functions/tasks/services/tasks-service.ts",
+      "firstSeen": 1759251108003,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759243133610,
+      "lastUpdated": 1759251108003
+    },
+    {
+      "path": "supabase/functions/tasks/types/index.ts",
+      "firstSeen": 1759251108007,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683124,
+      "lastUpdated": 1759251108007
+    },
+    {
+      "path": "supabase/functions/tasks/utils/jsdoc-parser.ts",
+      "firstSeen": 1759251108012,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683149,
+      "lastUpdated": 1759251108012
+    },
+    {
+      "path": "supabase/functions/tasks/utils/response-formatter.ts",
+      "firstSeen": 1759251108018,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683172,
+      "lastUpdated": 1759251108018
+    },
+    {
+      "path": "supabase/functions/tasks/utils/response-utils.ts",
+      "firstSeen": 1759251108022,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759243142308,
+      "lastUpdated": 1759251108022
+    },
+    {
+      "path": "supabase/functions/wrappedgapi/.npmrc",
+      "firstSeen": 1759251108027,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683184,
+      "lastUpdated": 1759251108027
+    },
+    {
+      "path": "supabase/functions/wrappedgapi/deno.json",
+      "firstSeen": 1759251108031,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752762967219,
+      "lastUpdated": 1759251108031
+    },
+    {
+      "path": "supabase/functions/wrappedgapi/deno.lock",
+      "firstSeen": 1759251108036,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759246634539,
+      "lastUpdated": 1759253187482
+    },
+    {
+      "path": "supabase/functions/wrappedgapi/index.ts",
+      "firstSeen": 1759251108040,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245707483,
+      "lastUpdated": 1759251108040
+    },
+    {
+      "path": "supabase/functions/wrappedkeystore/deno.json",
+      "firstSeen": 1759251108045,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683269,
+      "lastUpdated": 1759251108045
+    },
+    {
+      "path": "supabase/functions/wrappedkeystore/deno.lock",
+      "firstSeen": 1759251108049,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759246729272,
+      "lastUpdated": 1759253187485
+    },
+    {
+      "path": "supabase/functions/wrappedkeystore/index.ts",
+      "firstSeen": 1759251108054,
+      "lastReported": 1759252753692,
+      "reportedDates": {},
+      "lastModified": 1759252753692,
+      "lastUpdated": 1759253187489
+    },
+    {
+      "path": "supabase/functions/wrappedopenai/deno.json",
+      "firstSeen": 1759251108058,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683334,
+      "lastUpdated": 1759251108058
+    },
+    {
+      "path": "supabase/functions/wrappedopenai/deno.lock",
+      "firstSeen": 1759251108063,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683355,
+      "lastUpdated": 1759251108063
+    },
+    {
+      "path": "supabase/functions/wrappedopenai/index.ts",
+      "firstSeen": 1759251108067,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245768722,
+      "lastUpdated": 1759251108067
+    },
+    {
+      "path": "supabase/functions/wrappedsupabase/deno.json",
+      "firstSeen": 1759251108071,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683396,
+      "lastUpdated": 1759251108071
+    },
+    {
+      "path": "supabase/functions/wrappedsupabase/deno.lock",
+      "firstSeen": 1759251108075,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759252488154,
+      "lastUpdated": 1759253187492
+    },
+    {
+      "path": "supabase/functions/wrappedsupabase/index.ts",
+      "firstSeen": 1759251108079,
+      "lastReported": 1759252803412,
+      "reportedDates": {},
+      "lastModified": 1759252803412,
+      "lastUpdated": 1759253187495
+    },
+    {
+      "path": "supabase/functions/wrappedwebsearch/.npmrc",
+      "firstSeen": 1759251108083,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683452,
+      "lastUpdated": 1759251108083
+    },
+    {
+      "path": "supabase/functions/wrappedwebsearch/deno.json",
+      "firstSeen": 1759251108087,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683493,
+      "lastUpdated": 1759251108087
+    },
+    {
+      "path": "supabase/functions/wrappedwebsearch/deno.lock",
+      "firstSeen": 1759251108100,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683505,
+      "lastUpdated": 1759251108100
+    },
+    {
+      "path": "supabase/functions/wrappedwebsearch/index.ts",
+      "firstSeen": 1759251108104,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1759245822302,
+      "lastUpdated": 1759251108104
+    },
+    {
+      "path": "supabase/functions/wrappedwebsearch/websearch-service.ts",
+      "firstSeen": 1759251108108,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752240683547,
+      "lastUpdated": 1759251108108
+    },
+    {
+      "path": "supabase/migrations/001_create_task_tables.sql",
+      "firstSeen": 1759251108111,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752244142142,
+      "lastUpdated": 1759251108111
+    },
+    {
+      "path": "supabase/migrations/002_create_keystore_table.sql",
+      "firstSeen": 1759251108114,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752484610998,
+      "lastUpdated": 1759251108114
+    },
+    {
+      "path": "supabase/migrations/003_add_simple_test_task.sql",
+      "firstSeen": 1759251108117,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1752485979855,
+      "lastUpdated": 1759251108117
+    },
+    {
+      "path": "supabase/migrations/004_add_waiting_column_to_stack_runs.sql",
+      "firstSeen": 1759251108121,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1753169565041,
+      "lastUpdated": 1759251108121
+    },
+    {
+      "path": "supabase/migrations/005_add_resume_payload_column.sql",
+      "firstSeen": 1759251108124,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1753179448236,
+      "lastUpdated": 1759251108124
+    },
+    {
+      "path": "supabase/migrations/006_add_suspended_at_column.sql",
+      "firstSeen": 1759251108126,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756213549216,
+      "lastUpdated": 1759251108126
+    },
+    {
+      "path": "supabase/migrations/20250826113115_create_task_locks_table.sql",
+      "firstSeen": 1759251108129,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756207886847,
+      "lastUpdated": 1759251108129
+    },
+    {
+      "path": "taskcode/deno.json",
+      "firstSeen": 1759251108131,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756214461920,
+      "lastUpdated": 1759251108131
+    },
+    {
+      "path": "taskcode/deno.lock",
+      "firstSeen": 1759251108133,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1747679370931,
+      "lastUpdated": 1759251108133
+    },
+    {
+      "path": "taskcode/endpoints/comprehensive-gmail-search.js",
+      "firstSeen": 1759251108136,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1756216790190,
+      "lastUpdated": 1759251108136
+    },
+    {
+      "path": "taskcode/publish.ts",
+      "firstSeen": 1759251108138,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1753351531281,
+      "lastUpdated": 1759251108138
+    },
+    {
+      "path": "tsconfig.json",
+      "firstSeen": 1759251108140,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1744241013219,
+      "lastUpdated": 1759251108140
+    },
+    {
+      "path": "types/supabase.ts",
+      "firstSeen": 1759251108142,
+      "lastReported": null,
+      "reportedDates": {},
+      "lastModified": 1742280805789,
+      "lastUpdated": 1759251108142
+    }
+  ]
+}

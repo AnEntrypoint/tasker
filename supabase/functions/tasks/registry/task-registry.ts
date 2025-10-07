@@ -62,6 +62,13 @@ export class TaskRegistry {
   }
 
   /**
+   * Get task handler by ID - alias for getting the handler function
+   */
+  get(id: string): ((input: any, logs: string[]) => Promise<any>) | undefined {
+    return this.handlers.get(id);
+  }
+
+  /**
    * Get all tasks metadata
    */
   getAllTasksMetadata(): Array<{id: string} & TaskMetadata> {

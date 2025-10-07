@@ -14,6 +14,7 @@
     "test:gmail-simple": "npm run gmail-search:quick"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.58.0",
     "dotenv": "^16.4.7",
     "flowstate-execution": "^3.2.0",
     "sdk-http-wrapper": "file:../sdk-http-wrapper"

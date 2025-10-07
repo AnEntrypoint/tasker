@@ -750,6 +750,21 @@
     "https://deno.land/std@0.131.0/async/pool.ts": "97b0dd27c69544e374df857a40902e74e39532f226005543eabacb551e277082",
     "https://deno.land/std@0.131.0/async/tee.ts": "1341feb1f5b1a96f8628d0f8fc07d8c43d3813423f18a63bf1b4785568d21b1f",
     "https://deno.land/std@0.131.0/http/server.ts": "10c3a7814666cdbabd6f9c18acdcc4593e222275a628280a4868881445fbb5bc",
+    "https://deno.land/std@0.168.0/async/abortable.ts": "80b2ac399f142cc528f95a037a7d0e653296352d95c681e284533765961de409",
+    "https://deno.land/std@0.168.0/async/deadline.ts": "2c2deb53c7c28ca1dda7a3ad81e70508b1ebc25db52559de6b8636c9278fd41f",
+    "https://deno.land/std@0.168.0/async/debounce.ts": "60301ffb37e730cd2d6f9dadfd0ecb2a38857681bd7aaf6b0a106b06e5210a98",
+    "https://deno.land/std@0.168.0/async/deferred.ts": "77d3f84255c3627f1cc88699d8472b664d7635990d5358c4351623e098e917d6",
+    "https://deno.land/std@0.168.0/async/delay.ts": "5a9bfba8de38840308a7a33786a0155a7f6c1f7a859558ddcec5fe06e16daf57",
+    "https://deno.land/std@0.168.0/async/mod.ts": "7809ad4bb223e40f5fdc043e5c7ca04e0e25eed35c32c3c32e28697c553fa6d9",
+    "https://deno.land/std@0.168.0/async/mux_async_iterator.ts": "770a0ff26c59f8bbbda6b703a2235f04e379f73238e8d66a087edc68c2a2c35f",
+    "https://deno.land/std@0.168.0/async/pool.ts": "6854d8cd675a74c73391c82005cbbe4cc58183bddcd1fbbd7c2bcda42b61cf69",
+    "https://deno.land/std@0.168.0/async/retry.ts": "e8e5173623915bbc0ddc537698fa418cf875456c347eda1ed453528645b42e67",
+    "https://deno.land/std@0.168.0/async/tee.ts": "3a47cc4e9a940904fd4341f0224907e199121c80b831faa5ec2b054c6d2eff5e",
+    "https://deno.land/std@0.168.0/http/server.ts": "e99c1bee8a3f6571ee4cdeb2966efad465b8f6fe62bec1bdb59c1f007cc4d155",
+    "https://deno.land/std@0.201.0/async/delay.ts": "a6142eb44cdd856b645086af2b811b1fcce08ec06bb7d50969e6a872ee9b8659",
+    "https://deno.land/std@0.201.0/http/server.ts": "1b2403b3c544c0624ad23e8ca4e05877e65380d9e0d75d04957432d65c3d5f41",
+    "https://deno.land/x/dotenv@v3.2.2/mod.ts": "077b48773de9205266a0b44c3c3a3c3083449ed64bb0b6cc461b95720678d38e",
+    "https://deno.land/x/dotenv@v3.2.2/util.ts": "693730877b13f8ead2b79b2aa31e2a0652862f7dc0c5f6d2f313f4d39c7b7670",
     "https://deno.land/x/google_api@v1.2/deps.ts": "bf26fdcdd4aa4c2684e5d7a1863d144d37e79b305359eb21d5b905ef26dc1622",
     "https://deno.land/x/google_api@v1.2/google_api.ts": "c56d995bb1ac16d3fdc320288c3934b97c5ecaf52cfdafa5ce730b96d68afa10",
     "https://deno.land/x/google_api@v1.2/google_auth.ts": "2b33ea9efd37975b869acb3b33313773d256dec09d603796e98b112183bfe95a",
@@ -833,5 +848,12 @@
     "https://deno.land/x/jose@v5.8.0/util/decode_protected_header.ts": "cd6dd9116a97abc9d2ca4953c93b635667c4bb3559ba8cfce57e2b1cec581a6d",
     "https://deno.land/x/jose@v5.8.0/util/errors.ts": "5b57f5e40b3e7302634d4f31d848b23e58cc2322a547dbd35e75c792c4b3164c",
     "https://deno.land/x/jose@v5.8.0/util/runtime.ts": "088cae7df0d285065f141d880c5c21a572234997082337d1125d7f1603059642"
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:google-auth-library@9",
+      "npm:googleapis@133",
+      "npm:sdk-http-wrapper@1.0.10"
+    ]
   }
 }

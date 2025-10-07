@@ -151,7 +151,8 @@ export class Logger {
     }
 
     if (typeof data === 'object' && data !== null) {
-      const redacted = Array.isArray(data) ? [...data] : { ...data };
+      // CRITICAL: Deep clone to avoid mutating the original data
+      const redacted = JSON.parse(JSON.stringify(data));
 
       const redactValue = (obj: any, path: string = ''): void => {
         for (const key in obj) {

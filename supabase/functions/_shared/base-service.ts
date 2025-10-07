@@ -7,7 +7,7 @@
  */
 
 import { ConfigService } from './config-service.ts';
-import { logger, performance, context } from './logging-service.ts';
+import { logger, perf, context } from './logging-service.ts';
 import { DatabaseService } from './database-service.ts';
 
 // Service health status types
@@ -175,7 +175,7 @@ export abstract class BaseService {
   protected createServiceContext(context?: Partial<IServiceContext>): IServiceContext {
     return {
       requestId: context?.requestId || crypto.randomUUID(),
-      correlationId: context?.correlationId || context.getCorrelationId(),
+      correlationId: context?.correlationId || crypto.randomUUID(),
       service: this.serviceName,
       version: this.serviceVersion,
       ...context
@@ -191,7 +191,7 @@ export abstract class BaseService {
     context?: Partial<IServiceContext>
   ): Promise<IServiceResponse<T>> {
     const serviceContext = this.createServiceContext(context);
-    const timerId = performance.startTimer(`${this.serviceName}.${operationName}`, {
+    const timerId = perf.start(`${this.serviceName}.${operationName}`, {
       operation: operationName,
       requestId: serviceContext.requestId
     });
@@ -208,7 +208,7 @@ export abstract class BaseService {
       // Execute the operation
       const result = await operation();
 
-      const duration = performance.endTimer(timerId);
+      const duration = perf.end(timerId);
 
       logger.info(`Operation completed successfully: ${operationName}`, {
         requestId: serviceContext.requestId,
@@ -219,7 +219,7 @@ export abstract class BaseService {
       return this.createSuccessResponse(result, serviceContext, duration);
 
     } catch (error) {
-      const duration = performance.endTimer(timerId);
+      const duration = perf.end(timerId);
 
       logger.error(`Operation failed: ${operationName}`, error as Error, {
         requestId: serviceContext.requestId,
@@ -353,7 +353,7 @@ export abstract class BaseService {
    * Override this method in subclasses to add service-specific health checks
    */
   protected async performHealthCheck(): Promise<IHealthCheckResult> {
-    const timerId = performance.startTimer(`${this.serviceName}.healthCheck`);
+    const timerId = perf.start(`${this.serviceName}.healthCheck`);
 
     try {
       // Basic health checks
@@ -386,7 +386,7 @@ export abstract class BaseService {
         }
       });
 
-      const duration = performance.endTimer(timerId);
+      const duration = perf.end(timerId);
 
       if (overallStatus === 'healthy') {
         logger.info(`Health check passed for ${this.serviceName}`, { duration });
@@ -408,7 +408,7 @@ export abstract class BaseService {
       };
 
     } catch (error) {
-      const duration = performance.endTimer(timerId);
+      const duration = perf.end(timerId);
 
       logger.error(`Health check failed for ${this.serviceName}`, error as Error, { duration });
 
@@ -536,11 +536,23 @@ export const ServiceResponse = {
  */
 export function ServiceOperation(operationName: string) {
   return function (target: any, propertyName: string, descriptor: PropertyDescriptor) {
+    // Skip decoration if descriptor is not available
+    if (!descriptor) {
+      console.warn(`ServiceOperation decorator: Cannot apply to ${propertyName} - descriptor not found`);
+      return descriptor;
+    }
+
     const method = descriptor.value;
+
+    // Skip decoration if method is not available
+    if (!method || typeof method !== 'function') {
+      console.warn(`ServiceOperation decorator: Cannot apply to ${propertyName} - method not found or not a function`);
+      return descriptor;
+    }
 
     descriptor.value = async function (...args: any[]) {
       const serviceName = (this as BaseService).serviceName;
-      const timerId = performance.startTimer(`${serviceName}.${operationName}`);
+      const timerId = perf.start(`${serviceName}.${operationName}`);
 
       try {
         logger.info(`Starting ${operationName}`, {
@@ -551,7 +563,7 @@ export function ServiceOperation(operationName: string) {
 
         const result = await method.apply(this, args);
 
-        const duration = performance.endTimer(timerId);
+        const duration = perf.end(timerId);
         logger.info(`Completed ${operationName}`, {
           service: serviceName,
           operation: operationName,
@@ -561,7 +573,7 @@ export function ServiceOperation(operationName: string) {
 
         return result;
       } catch (error) {
-        const duration = performance.endTimer(timerId);
+        const duration = perf.end(timerId);
         logger.error(`Failed ${operationName}`, error as Error, {
           service: serviceName,
           operation: operationName,

@@ -27,17 +27,32 @@ async function getCredentials(): Promise<any> {
   if (cachedCreds) return cachedCreds;
 
   try {
-    // Use service registry to call keystore
-    const result = await serviceRegistry.call('keystore', 'getKey', ['global', 'GAPI_KEY']);
+    const result = await serviceRegistry.call('keystore', 'getKey', ['default', 'GAPI_KEY']);
 
     if (!result.success) {
       throw new Error(`Failed to get credentials: ${result.error}`);
     }
 
     console.log(`Got credentials response from keystore`);
+    console.log(`Credentials result structure: ${JSON.stringify({
+      hasData: !!result.data,
+      dataType: typeof result.data,
+      hasDataData: !!result.data?.data,
+      dataDataType: typeof result.data?.data,
+      hasDataDataData: !!result.data?.data?.data,
+      dataDataDataType: typeof result.data?.data?.data,
+      dataDataDataPreview: typeof result.data?.data?.data === 'string' ? result.data.data.data.substring(0, 50) : result.data?.data?.data
+    })}`);
 
-    // The keystore service returns the credential JSON directly
-    cachedCreds = JSON.parse(result.data);
+    // Service registry triple wraps: { success, data: { success, data: { success, data: "json" } } }
+    const credentialsJson = result.data?.data?.data;
+
+    if (!credentialsJson || typeof credentialsJson !== 'string') {
+      console.error(`Invalid credentials format. Type: ${typeof credentialsJson}, Value: ${credentialsJson}`);
+      throw new Error('No credentials returned from keystore');
+    }
+
+    cachedCreds = JSON.parse(credentialsJson);
 
     console.log(`Loaded credentials for ${cachedCreds.client_email}`);
     return cachedCreds;
@@ -55,8 +70,7 @@ async function getAdminEmail(): Promise<string> {
   if (cachedAdminEmail) return cachedAdminEmail;
 
   try {
-    // Use service registry to call keystore
-    const result = await serviceRegistry.call('keystore', 'getKey', ['global', 'GAPI_ADMIN_EMAIL']);
+    const result = await serviceRegistry.call('keystore', 'getKey', ['default', 'GAPI_ADMIN_EMAIL']);
 
     if (!result.success) {
       throw new Error(`Failed to get admin email: ${result.error}`);
@@ -64,16 +78,14 @@ async function getAdminEmail(): Promise<string> {
 
     console.log(`Got admin email response from keystore`);
 
-    // The keystore service returns the email value directly
-    const emailValue = result.data;
+    // Service registry triple wraps: { success, data: { success, data: { success, data: "email" } } }
+    const emailValue = result.data?.data?.data;
 
-    if (!emailValue || emailValue.trim() === '') {
-      throw new Error('Empty or invalid admin email received');
+    if (!emailValue || typeof emailValue !== 'string' || emailValue.trim() === '') {
+      throw new Error(`Empty or invalid admin email received`);
     }
 
-    // Ensure we have a non-null string
-    const email: string = emailValue;
-    cachedAdminEmail = email;
+    cachedAdminEmail = emailValue;
     console.log(`Loaded admin email: ${cachedAdminEmail}`);
     return cachedAdminEmail;
   } catch (error) {
