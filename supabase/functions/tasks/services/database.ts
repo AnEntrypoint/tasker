@@ -13,7 +13,7 @@ import {
 } from '../../_shared/database-service.ts';
 
 // Re-export fetchTaskFromDatabase with backward compatible signature
-export async function fetchTaskFromDatabase(taskId?: string, taskName?: string): Promise<TaskFunction | null> {
+export async function fetchTaskFromDatabase(taskId?: string, taskName?: string): Promise<{ taskFunction: any, taskName: string, description: string } | null> {
   const identifier = taskId || taskName;
   if (!identifier) {
     console.error("Database query error: Either taskId or taskName must be provided");
@@ -23,13 +23,22 @@ export async function fetchTaskFromDatabase(taskId?: string, taskName?: string):
   console.log(`[INFO] Fetching task: ${identifier}`);
 
   try {
-    const taskFunction = await dbFetchTaskFromDatabase(identifier, taskId);
-    if (taskFunction) {
-      console.log(`[INFO] Task found: ${taskFunction.name} (id: ${taskFunction.id})`);
+    const taskData = await dbFetchTaskFromDatabase(identifier, taskId);
+    if (taskData) {
+      console.log(`[INFO] Task found: ${taskData.name} (id: ${taskData.id})`);
+
+      // Extract task function code and create executable function
+      const taskFunction = taskData.code;
+
+      return {
+        taskFunction,
+        taskName: taskData.name,
+        description: taskData.description || ''
+      };
     } else {
       console.log(`[INFO] No task found: ${identifier}`);
     }
-    return taskFunction;
+    return null;
   } catch (error) {
     console.error(`[ERROR] Database fetch error: ${error instanceof Error ? error.message : String(error)}`);
     return null;

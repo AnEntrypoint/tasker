@@ -17,8 +17,8 @@ declare global {
   var __updatedFields: Record<string, any>;
 }
 
-// Route mapping
-const routes = {
+// Route mapping - extract just the pathname part for routing
+const routes: Record<string, (req: Request) => Promise<Response>> = {
     '/': tasksHandler,
     '/execute': executeHandler,
     '/status': statusHandler,
@@ -40,8 +40,12 @@ async function handler(req: Request): Promise<Response> {
         const url = new URL(req.url);
         const pathname = url.pathname;
 
+        // Extract the last part of the path for routing
+        const pathParts = pathname.split('/');
+        const routePath = '/' + pathParts[pathParts.length - 1];
+
         // Route to appropriate handler
-        const routeHandler = routes[pathname] || tasksHandler;
+        const routeHandler = routes[routePath] || tasksHandler;
         return await routeHandler(req);
     } catch (error) {
         hostLog(LOG_PREFIX_BASE, `Unhandled error: ${error}`);

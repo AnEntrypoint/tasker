@@ -62,44 +62,77 @@ export class ConfigService {
     return env as Environment;
   }
 
-  // Initialize service configurations
   private initializeServices(): void {
+    const supabaseUrl = this.getSupabaseUrl();
+
     this._services.set('supabase', {
       name: 'supabase',
       port: 54321,
-      baseUrl: this.getSupabaseUrl(),
+      baseUrl: supabaseUrl,
       environment: this._environment,
       debug: this.isDebug
     });
 
     this._services.set('tasks', {
       name: 'tasks',
-      port: 8000,
-      baseUrl: 'http://localhost:8000',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/tasks`,
       environment: this._environment,
       debug: this.isDebug
     });
 
     this._services.set('stack-processor', {
       name: 'stack-processor',
-      port: 8001,
-      baseUrl: 'http://localhost:8001',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/simple-stack-processor`,
       environment: this._environment,
       debug: this.isDebug
     });
 
-    this._services.set('keystore', {
-      name: 'keystore',
-      port: 8002,
-      baseUrl: 'http://localhost:8002',
+    this._services.set('wrappedkeystore', {
+      name: 'wrappedkeystore',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/wrappedkeystore`,
       environment: this._environment,
       debug: this.isDebug
     });
 
-    this._services.set('gapi', {
-      name: 'gapi',
-      port: 8003,
-      baseUrl: 'http://localhost:8003',
+    this._services.set('wrappedgapi', {
+      name: 'wrappedgapi',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/wrappedgapi`,
+      environment: this._environment,
+      debug: this.isDebug
+    });
+
+    this._services.set('wrappedsupabase', {
+      name: 'wrappedsupabase',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/wrappedsupabase`,
+      environment: this._environment,
+      debug: this.isDebug
+    });
+
+    this._services.set('wrappedopenai', {
+      name: 'wrappedopenai',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/wrappedopenai`,
+      environment: this._environment,
+      debug: this.isDebug
+    });
+
+    this._services.set('wrappedwebsearch', {
+      name: 'wrappedwebsearch',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/wrappedwebsearch`,
+      environment: this._environment,
+      debug: this.isDebug
+    });
+
+    this._services.set('deno-executor', {
+      name: 'deno-executor',
+      port: 54321,
+      baseUrl: `${supabaseUrl}/functions/v1/deno-executor`,
       environment: this._environment,
       debug: this.isDebug
     });

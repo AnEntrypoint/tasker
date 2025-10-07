@@ -1,0 +1,168 @@
+{
+  "projectType": "node-library",
+  "framework": null,
+  "languages": [
+    "unknown",
+    "markdown",
+    "javascript",
+    "json",
+    "toml",
+    "typescript"
+  ],
+  "buildTools": [],
+  "packageManagers": [
+    "npm"
+  ],
+  "testingFrameworks": [],
+  "dependencies": [
+    [
+      "@supabase/supabase-js",
+      "^2.58.0"
+    ],
+    [
+      "dotenv",
+      "^16.4.7"
+    ],
+    [
+      "flowstate-execution",
+      "^3.2.0"
+    ],
+    [
+      "sdk-http-wrapper",
+      "file:../sdk-http-wrapper"
+    ]
+  ],
+  "devDependencies": [
+    [
+      "concurrently",
+      "^8.2.2"
+    ]
+  ],
+  "structure": {
+    "directories": [
+      ".claude",
+      ".git",
+      ".glootie",
+      "code_search_index",
+      "glootie",
+      ".mcp-metadata",
+      "node_modules",
+      "supabase",
+      ".branches",
+      ".temp",
+      "functions",
+      "_shared",
+      "admin-debug",
+      "deno-executor",
+      "simple-stack-processor",
+      "tasks",
+      "config",
+      "handlers",
+      "registry",
+      "services",
+      "types",
+      "utils",
+      "wrappedgapi",
+      "wrappedkeystore",
+      "wrappedopenai",
+      "wrappedsupabase",
+      "wrappedwebsearch",
+      "migrations",
+      "taskcode",
+      "endpoints"
+    ],
+    "files": [
+      ".env",
+      ".env.example",
+      ".gitignore",
+      "ARCHITECTURE_DEMO.md",
+      "ARCHITECTURE_STANDARDS.md",
+      "CLAUDE.md",
+      "MIGRATION.md",
+      "README.md",
+      "RULES.md",
+      "SERVICE_REGISTRY_IMPORT_MAP.md",
+      "check-schema.js",
+      "check-table-structure.js",
+      "comprehensive-gmail-search-cli.js",
+      "deno.json",
+      "deno.lock",
+      ".caveats.txt",
+      ".glootie-project-structure.json",
+      ".mcp-file-analysis-metadata.json",
+      ".mcp-init-flag.json",
+      "monitor-execution.js",
+      "package-lock.json",
+      "package.json",
+      "prompt.md",
+      "schema.sql",
+      "config.toml",
+      "LOGGING_MIGRATION_GUIDE.md",
+      "LOGGING_SERVICE_SUMMARY.md",
+      "base-service.ts",
+      "config-service.ts",
+      "cors.ts",
+      "database-service.ts",
+      "http-client.ts",
+      "http-handler.ts",
+      "logging-example.ts",
+      "logging-service.ts",
+      "service-registry.ts",
+      "test-logging.ts",
+      "utils.ts",
+      "index.ts",
+      "flowstate-storage.ts",
+      "vm-state-manager.ts",
+      "import_map.json",
+      ".npmrc",
+      "index-original.ts",
+      "websearch-service.ts",
+      "001_create_task_tables.sql",
+      "002_create_keystore_table.sql",
+      "003_add_simple_test_task.sql",
+      "004_add_waiting_column_to_stack_runs.sql",
+      "005_add_resume_payload_column.sql",
+      "006_add_suspended_at_column.sql",
+      "20250826113115_create_task_locks_table.sql",
+      "comprehensive-gmail-search.js",
+      "publish.ts",
+      "temp-check-task.ts",
+      "test-8003-server.ts",
+      "test-complete-workflow.js",
+      "test-fetch-task.ts",
+      "test-proper-task-execution.js",
+      "test-unified-architecture.js",
+      "tsconfig.json",
+      "supabase.ts"
+    ],
+    "configFiles": [
+      ".env",
+      ".env.example",
+      ".gitignore",
+      ".caveats.txt",
+      ".glootie-project-structure.json",
+      ".mcp-file-analysis-metadata.json",
+      ".mcp-init-flag.json",
+      "package.json",
+      ".npmrc",
+      "tsconfig.json"
+    ]
+  },
+  "patterns": {
+    "hasTypeScript": false,
+    "hasTests": false,
+    "hasSrcDir": false,
+    "hasPublicDir": false,
+    "monorepo": false,
+    "hasDocker": false,
+    "hasCI": false
+  },
+  "recommendations": [
+    "💡 Consider adding TypeScript for better type safety",
+    "🧪 Consider adding tests for better code quality",
+    "🔧 Consider adding a build tool like Vite or Webpack",
+    "🐳 Consider adding Docker for containerization",
+    "🔄 Consider adding CI/CD pipeline for automation"
+  ],
+  "lastAnalyzed": 1759480933784
+}

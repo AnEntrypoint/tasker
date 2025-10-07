@@ -8,7 +8,7 @@
 
 import { createClient, SupabaseClient, PostgrestSingleResponse, PostgrestResponse } from 'https://esm.sh/@supabase/supabase-js@2';
 import { ConfigService, DatabaseConfig } from './config-service.ts';
-import { logger, performance, context } from './logging-service.ts';
+import { logger, perf, context } from './logging-service.ts';
 
 // Database connection pool interface
 interface ConnectionPool {
@@ -227,18 +227,12 @@ export class DatabaseService {
       context: queryContext = {}
     } = options;
 
-    const perfTimer = performance.startTimer(`db.${operation}`);
+    const timerId = perf.start(`db.${operation}`);
     let retryCount = 0;
     let lastError: Error | null = null;
 
     // Add query context
-    const queryId = context.getCorrelationId() || crypto.randomUUID();
-    context.withContext({
-      queryId,
-      operation,
-      retryCount: 0,
-      ...queryContext
-    });
+    const queryId = crypto.randomUUID();
 
     logger.debug(`Executing database operation: ${operation}`, {
       queryId,
@@ -266,7 +260,7 @@ export class DatabaseService {
           throw new Error(`Database error: ${result.error.message} (code: ${result.error.code})`);
         }
 
-        const duration = perfTimer.end();
+        const duration = perf.end(timerId);
 
         if (enablePerformanceLogging) {
           logger.info(`Database operation completed: ${operation}`, {
@@ -302,13 +296,12 @@ export class DatabaseService {
 
         if (retryCount <= retries) {
           await new Promise(resolve => setTimeout(resolve, retryDelay * retryCount));
-          context.withContext({ retryCount });
         }
       }
     }
 
     // All retries exhausted
-    const duration = perfTimer.end();
+    const duration = perf.end(timerId);
     logger.error(`Database operation failed after ${retries + 1} attempts: ${operation}`, {
       queryId,
       duration,
@@ -337,7 +330,7 @@ export class DatabaseService {
     }>,
     options: QueryOptions = {}
   ): Promise<DatabaseResult<T[]>> {
-    const perfTimer = performance.startTimer('db.transaction');
+    const transactionTimerId = perf.start('db.transaction');
     const transactionId = crypto.randomUUID();
 
     logger.info(`Starting database transaction with ${operations.length} operations`, {
@@ -366,7 +359,7 @@ export class DatabaseService {
       }
 
       this.releaseClient(client);
-      const duration = perfTimer.end();
+      const duration = perf.end(transactionTimerId);
 
       logger.info(`Database transaction completed successfully`, {
         transactionId,
@@ -390,7 +383,7 @@ export class DatabaseService {
         this.releaseClient(client);
       }
 
-      const duration = perfTimer.end();
+      const duration = perf.end(transactionTimerId);
       const err = error instanceof Error ? error : new Error(String(error));
 
       logger.error(`Database transaction failed`, {
@@ -566,7 +559,7 @@ export class DatabaseService {
    * Health check for database connection
    */
   public async healthCheck(): Promise<{ healthy: boolean; error?: string; performance?: number }> {
-    const perfTimer = performance.startTimer('db.healthCheck');
+    const healthTimerId = perf.start('db.healthCheck');
 
     try {
       const result = await this.executeQuery(
@@ -574,7 +567,7 @@ export class DatabaseService {
         (client) => client.from('task_functions').select('id').limit(1)
       );
 
-      const duration = perfTimer.end();
+      const duration = perf.end(healthTimerId);
 
       return {
         healthy: result.success,
@@ -582,7 +575,7 @@ export class DatabaseService {
         performance: duration
       };
     } catch (error) {
-      const duration = perfTimer.end();
+      const duration = perf.end(healthTimerId);
       return {
         healthy: false,
         error: error instanceof Error ? error.message : String(error),

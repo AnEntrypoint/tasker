@@ -1,6 +1,6 @@
 /**
  * Comprehensive Gmail Search across all Google Workspace domains and users
- * 
+ *
  * This task demonstrates automatic suspend/resume by making multiple external module calls.
  * The deno-executor runtime will automatically suspend execution on each external call,
  * create child stack runs, process the call, and resume execution with results.
@@ -13,7 +13,7 @@
  * @param {number} [input.maxUsersPerDomain=5] - Maximum users to process per domain
  * @returns {Object} Comprehensive search results with domain breakdown
  */
-module.exports = function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUsersPerDomain = 500 }) {
+module.exports = async function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUsersPerDomain = 500 }) {
   // CRITICAL FIX: Enforce Google API limits to prevent errors
   // Google Admin API limits: maxResults must be between 1 and 500
   maxUsersPerDomain = Math.min(Math.max(maxUsersPerDomain, 1), 500);
@@ -27,7 +27,7 @@ module.exports = function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUs
   // Step 1: Discover all Google Workspace domains (with suspend/resume)
   console.log('🏢 Step 1: Discovering Google Workspace domains...');
   
-  const domainsResponse = __callHostTool__("gapi", ["admin", "domains", "list"], [{
+  const domainsResponse = await __callHostTool__("gapi", ["admin", "domains", "list"], [{
     customer: "my_customer"
   }]);
   
@@ -68,7 +68,7 @@ module.exports = function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUs
     console.log('👥 Listing users for domain: ' + domain + ' (' + (i + 1) + '/' + domains.length + ')');
     
     // CRITICAL: Don't catch TASK_SUSPENDED - let suspend/resume work
-    const usersResponse = __callHostTool__("gapi", ["admin", "users", "list"], [{
+    const usersResponse = await __callHostTool__("gapi", ["admin", "users", "list"], [{
       customer: "my_customer",
       domain: domain,
       maxResults: maxUsersPerDomain,
@@ -132,7 +132,7 @@ module.exports = function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUs
       
       // CRITICAL: Don't catch TASK_SUSPENDED - let suspend/resume work
       // Search Gmail messages for this user
-      const gmailResponse = __callHostTool__("gapi", ["gmail", "users", "messages", "list"], [{
+      const gmailResponse = await __callHostTool__("gapi", ["gmail", "users", "messages", "list"], [{
         userId: user.email,
         q: gmailSearchQuery,
         maxResults: maxResultsPerUser
@@ -149,7 +149,7 @@ module.exports = function({ gmailSearchQuery = "", maxResultsPerUser = 10, maxUs
         // Get details for all messages
         for (let k = 0; k < gmailResponse.messages.length; k++) {
           const messageId = gmailResponse.messages[k].id;
-          const messageDetail = __callHostTool__("gapi", ["gmail", "users", "messages", "get"], [{
+          const messageDetail = await __callHostTool__("gapi", ["gmail", "users", "messages", "get"], [{
             userId: user.email,
             id: messageId,
             format: 'metadata',

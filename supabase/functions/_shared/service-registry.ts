@@ -185,7 +185,6 @@ export class ServiceRegistry {
       }
     });
 
-    // Key/Value store service
     this.registerService({
       name: 'keystore',
       baseUrl: this.getServiceUrl('wrappedkeystore'),
@@ -193,43 +192,35 @@ export class ServiceRegistry {
       description: 'Key-value storage for credentials and configuration',
       methods: [
         {
-          name: 'get',
+          name: 'getKey',
           description: 'Get a value by key',
-          path: '/get',
+          path: '/getKey',
           method: 'POST',
           parameters: [
+            { name: 'namespace', type: 'string', required: true, description: 'Namespace' },
             { name: 'key', type: 'string', required: true, description: 'Key to retrieve' }
           ],
           returnType: 'string'
         },
         {
-          name: 'set',
+          name: 'setKey',
           description: 'Set a value by key',
-          path: '/set',
+          path: '/setKey',
           method: 'POST',
           parameters: [
+            { name: 'namespace', type: 'string', required: true, description: 'Namespace' },
             { name: 'key', type: 'string', required: true, description: 'Key to set' },
             { name: 'value', type: 'string', required: true, description: 'Value to set' }
           ],
           returnType: 'boolean'
         },
         {
-          name: 'delete',
-          description: 'Delete a key',
-          path: '/delete',
+          name: 'listKeys',
+          description: 'List all keys',
+          path: '/listKeys',
           method: 'POST',
           parameters: [
-            { name: 'key', type: 'string', required: true, description: 'Key to delete' }
-          ],
-          returnType: 'boolean'
-        },
-        {
-          name: 'list',
-          description: 'List all keys',
-          path: '/list',
-          method: 'GET',
-          parameters: [
-            { name: 'prefix', type: 'string', required: false, description: 'Key prefix filter' }
+            { name: 'namespace', type: 'string', required: false, description: 'Namespace filter' }
           ],
           returnType: 'string[]'
         }
@@ -373,17 +364,9 @@ export class ServiceRegistry {
       return serviceConfig.baseUrl;
     }
 
-    // Fallback to localhost for development
-    const ports: Record<string, number> = {
-      'wrappedsupabase': 8002,
-      'wrappedkeystore': 8003,
-      'wrappedgapi': 8004,
-      'wrappedopenai': 8005,
-      'wrappedwebsearch': 8006
-    };
-
-    const port = ports[serviceName] || 8000;
-    return `http://localhost:${port}`;
+    // Fallback to Supabase edge functions for development
+    const supabaseUrl = config.supabase?.url || 'http://127.0.0.1:54321';
+    return `${supabaseUrl}/functions/v1/${serviceName}`;
   }
 
   /**
@@ -429,6 +412,15 @@ export class ServiceRegistry {
     args: any[] = [],
     context?: Partial<ServiceCallContext>
   ): Promise<ServiceResponse<T>> {
+    // ULTRA DEBUG: Log every single call to confirm this method is being executed
+    console.log('[ServiceRegistry.call] ENTRY', {
+      serviceName,
+      methodName,
+      argsType: typeof args,
+      isArray: Array.isArray(args),
+      argsLength: Array.isArray(args) ? args.length : 'N/A'
+    });
+
     const service = this.services.get(serviceName);
     if (!service) {
       throw new Error(`Service not found: ${serviceName}`);
@@ -475,13 +467,44 @@ export class ServiceRegistry {
         }
       }
 
-      // Build request URL
-      const url = `${service.baseUrl}${method.path}`;
+      // Build request URL - use base URL directly, not with method.path
+      const url = service.baseUrl;
+
+      // Prepare request body
+      let requestBody;
+      if (method.method !== 'GET') {
+        // Debug logging for processChain calls
+        if (methodName === 'processChain') {
+          console.log('[ServiceRegistry-DEBUG] processChain call received', {
+            argsType: typeof args,
+            isArray: Array.isArray(args),
+            hasChain: args && typeof args === 'object' && 'chain' in args,
+            argsKeys: args && typeof args === 'object' ? Object.keys(args) : []
+          });
+        }
+
+        // Special handling for processChain - pass chain directly, not wrapped
+        // Check if args itself is an object with chain property (not an array containing it)
+        if (methodName === 'processChain' && typeof args === 'object' && args !== null && 'chain' in args && !Array.isArray(args)) {
+          requestBody = args; // args = { chain: [...] }
+          console.log('[ServiceRegistry-DEBUG] processChain: passing chain directly', { chainLength: args.chain?.length });
+        } else {
+          // Standard chain format for other methods
+          requestBody = {
+            chain: [
+              { property: methodName, args: args }
+            ]
+          };
+          if (methodName === 'processChain') {
+            console.log('[ServiceRegistry-DEBUG] processChain: wrapping in chain format (fallback)', { argsType: typeof args });
+          }
+        }
+      }
 
       // Prepare request options with FlowState integration
       const requestOptions = {
-        method: method.method,
-        body: method.method !== 'GET' ? { args } : undefined,
+        method: 'POST',
+        body: requestBody,
         timeout: method.timeout || 30000,
         retries: method.retries || 3,
         enableFlowState: true,
@@ -601,6 +624,16 @@ export class ServiceRegistry {
     const service = this.services.get(serviceName);
     if (!service || !service.healthCheck) {
       return 'unknown';
+    }
+
+    // Skip health checks for wrapped services when using integrated Supabase server
+    // (all functions served from same endpoint, individual health checks don't work)
+    const supabaseUrl = config.supabase?.url || 'http://127.0.0.1:54321';
+    if (service.baseUrl.startsWith(supabaseUrl) &&
+        (serviceName.startsWith('wrapped') || ['gapi', 'keystore', 'database', 'openai', 'websearch'].includes(serviceName))) {
+      this.healthStatus.set(serviceName, 'healthy');
+      this.lastHealthCheck.set(serviceName, Date.now());
+      return 'healthy';
     }
 
     try {
